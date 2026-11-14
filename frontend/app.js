@@ -747,7 +747,16 @@
   }
 
   function startPlayback() {
-    if (state.frames.length < 2) return;
+    if (state.frames.length < 2) {
+      // Previously a silent no-op - nothing told you why Play did nothing
+      // if the search only turned up 0 or 1 usable frame.
+      progressText.textContent =
+        state.frames.length === 0
+          ? "No frames loaded yet - nothing to play."
+          : "Only 1 frame loaded - need at least 2 to blink. Try a larger FOV, more detectors, or a different grouping.";
+      progressWrap.hidden = false;
+      return;
+    }
     state.playing = true;
     playBtn.textContent = "⏸";
     const tick = () => {

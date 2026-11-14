@@ -125,6 +125,15 @@ def _cutout_url(record: ImageRecord, coord: SkyCoord, fov_arcmin: float) -> str:
     return f"{record.access_url}?center={coord.ra.deg},{coord.dec.deg}d&size={size_deg}"
 
 
+class _RetryableHTTPStatus(Exception):
+    """Internal marker: an HTTP status we've configured as transient
+    (503/502/504 - "server busy", not "your request is wrong"). Kept
+    separate from `requests.HTTPError` so a genuinely bad request (a 4xx
+    like the 422 IRSA sometimes returns for a malformed/out-of-range
+    cutout request) fails fast instead of burning 4 retries + backoff on
+    something that was never going to succeed."""
+
+
 def _fetch_one(record: ImageRecord, coord: SkyCoord, fov_arcmin: float, session: requests.Session) -> Cutout:
     cfg = get_config().fetch
     url = _cutout_url(record, coord, fov_arcmin)
@@ -135,8 +144,8 @@ def _fetch_one(record: ImageRecord, coord: SkyCoord, fov_arcmin: float, session:
             with _global_fetch_semaphore:
                 resp = session.get(url, timeout=(cfg.connect_timeout_s, cfg.read_timeout_s))
             if resp.status_code in cfg.retry_status_codes:
-                raise requests.HTTPError(f"{resp.status_code} {resp.text[:100]}")
-            resp.raise_for_status()
+                raise _RetryableHTTPStatus(f"{resp.status_code} {resp.text[:100]}")
+            resp.raise_for_status()  # non-retryable 4xx/5xx -> plain HTTPError, not retried below
             full = fits.open(io.BytesIO(resp.content))
             # Keep only the extensions we use; drop EPSF (and anything else
             # unexpected) before this ever leaves memory for the pipeline.
@@ -148,8 +157,8 @@ def _fetch_one(record: ImageRecord, coord: SkyCoord, fov_arcmin: float, session:
         except (
             requests.Timeout,
             requests.ConnectionError,
-            requests.HTTPError,
             ConnectionResetError,
+            _RetryableHTTPStatus,
         ) as exc:
             last_exc = exc
             if attempt < cfg.max_retries:
@@ -157,6 +166,11 @@ def _fetch_one(record: ImageRecord, coord: SkyCoord, fov_arcmin: float, session:
                 log.debug("cutout fetch retry %d/%d for %s: %s", attempt + 1, cfg.max_retries, url, exc)
                 time.sleep(sleep_s)
             continue
+        except requests.HTTPError as exc:
+            # A real client/server error (e.g. 422) - retrying with the same
+            # URL won't change the outcome, so fail fast instead of wasting
+            # the full retry budget.
+            raise DiscoveryError(f"Cutout fetch permanently failed (not retrying): {url} ({exc})") from exc
     raise DiscoveryError(f"Cutout fetch failed after {cfg.max_retries} retries: {url} ({last_exc})")
 
 
