@@ -1,0 +1,59 @@
+# SPHEREx data sources. Update this file (or just rely on the runtime
+# discovery below) when IRSA ships a new release — nothing else in the
+# codebase should hard-code a release name. See PLAN.md Phase 0 finding #1.
+
+irsa:
+  base_url: "https://irsa.ipac.caltech.edu"
+  tap_endpoint: "/TAP"
+  # SIA is preferred for live/user-facing discovery (measured 3-6x faster
+  # than TAP, see PLAN.md). TAP is kept as a fallback for completeness.
+  sia_collection_prefix: "spherex"
+  # Known-good as of 2026-11-14; `backend/app/irsa.py:discover_collections()`
+  # re-derives this list at runtime and only falls back to these if the
+  # discovery call itself fails (e.g. IRSA is unreachable).
+  fallback_collections:
+    - spherex_dr1
+    - spherex_qr3
+  # Collections to EXCLUDE even if they match the prefix: pre-aggregated
+  # "cube" and "deep" products aren't individual-epoch exposures.
+  exclude_suffixes:
+    - "_cube"
+    - "_deep"
+
+simbad:
+  # Tried in order. Harvard confirmed live 2026-11-14; CDS is the
+  # astroquery default but was returning 404 on every path (see PLAN.md
+  # Phase 0 finding #7) — kept in the list in case it comes back.
+  tap_mirrors:
+    - "https://simbad.harvard.edu/simbad/sim-tap"
+    - "https://simbad.cds.unistra.fr/simbad/sim-tap"
+
+detectors:
+  # D1..D6, linear variable filters (see SPHEREx_tool_prompt.md). Default
+  # subset for a new query — chosen for speed, user can add more.
+  all: [D1, D2, D3, D4, D5, D6]
+  default: [D6, D2]
+  wavelength_um:
+    D1: [0.75, 1.09]
+    D2: [1.10, 1.62]
+    D3: [1.63, 2.41]
+    D4: [2.42, 3.82]
+    D5: [3.83, 4.41]
+    D6: [4.42, 5.00]
+
+fov:
+  default_arcmin: 5
+  min_arcmin: 1
+  max_arcmin: 30
+  warn_above_arcmin: 15
+
+fetch:
+  max_workers: 10
+  global_concurrency_cap: 24
+  connect_timeout_s: 10
+  read_timeout_s: 30
+  max_retries: 4
+  backoff_base_s: 2
+  retry_status_codes: [503, 502, 504]
+
+pixel_scale_arcsec: 6.15
