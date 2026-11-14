@@ -49,6 +49,10 @@ class DiscoveryError(Exception):
     pass
 
 
+# Pauses between attempts of one SIA query (so 3 attempts in ~6s at most).
+_SIA_RETRY_SLEEPS_S = (2, 4)
+
+
 @dataclass
 class ImageRecord:
     """One SPHEREx exposure's metadata, before any pixels are fetched."""
@@ -90,10 +94,21 @@ def find_images(coord: SkyCoord, fov_arcmin: float, detectors: Optional[list[str
     """
     collections = discover_collections()
     radius = (fov_arcmin / 2.0) * u.arcmin
-    try:
-        rows = Irsa.query_sia(pos=(coord, radius), collection=collections)
-    except Exception as exc:  # noqa: BLE001
-        raise DiscoveryError(f"SIA query failed: {exc}") from exc
+    # IRSA's search front end drops out intermittently ("502 Proxy Error",
+    # "Unable to access the capabilities endpoint") and often answers again
+    # seconds later, so a failed query gets a few quick retries here. An
+    # outage that outlasts them is reported to the browser, which keeps
+    # retrying on a slower, visible schedule (frontend/app.js).
+    rows = None
+    for attempt in range(len(_SIA_RETRY_SLEEPS_S) + 1):
+        try:
+            rows = Irsa.query_sia(pos=(coord, radius), collection=collections)
+            break
+        except Exception as exc:  # noqa: BLE001
+            if attempt == len(_SIA_RETRY_SLEEPS_S):
+                raise DiscoveryError(f"SIA query failed: {exc}") from exc
+            log.warning("SIA query failed (attempt %d), retrying in %ds: %s", attempt + 1, _SIA_RETRY_SLEEPS_S[attempt], exc)
+            time.sleep(_SIA_RETRY_SLEEPS_S[attempt])
 
     records = []
     for row in rows:

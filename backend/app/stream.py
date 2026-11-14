@@ -121,6 +121,14 @@ def stream_frames(
 
     stats.log_report(t_start, n_fetched, n_frames_emitted)
 
+    # Images exist here but not one cutout could be downloaded (IRSA busy):
+    # report that as a failure, so the browser doesn't mistake an empty
+    # stream for "no SPHEREx images at this position".
+    if n_frames_emitted == 0:
+        raise DiscoveryError(
+            f"found {len(records)} image(s) but every cutout download failed (IRSA busy) - try again shortly"
+        )
+
 
 class _TimingStats:
     """Accumulates where the time went for one /api/frames request, so a
