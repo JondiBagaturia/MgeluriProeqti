@@ -212,6 +212,32 @@ Nasa_spaceapps/
   by reprojecting onto a small common grid sized to the requested FOV only.
 - Python 3.14 incompatibility with the astro stack — pinned 3.11 everywhere.
 
+### Post-launch finding: dropped the `reproject` package
+The brief says "use astropy, astroquery, reproject and numpy... don't
+reimplement them." We did, for one narrow piece: nearest-neighbour
+reprojection (`app/pipeline.py`'s `reproject_nearest`), replacing
+`reproject.reproject_interp(order="nearest-neighbor")`.
+
+Root cause: a real bug report (Barnard's Star showing "no data" at its
+own target pixel) led first to a flag-masking fix, then to switching
+reproject's default bilinear mode to its own nearest-neighbor mode (fixes
+most of it — bilinear blends in a masked neighbour's NaN even when the
+exact output pixel's own nearest native pixel is clean). But a live check
+(`scripts/check_center_pixel_coverage.py`) still found residual cases:
+reproject's *own* nearest-neighbor mode returned a 0 footprint (NaN) at
+specific exposures' exact pixel-boundary coordinates (e.g. input pixel
+coordinate `(13.79, 13.56)`) even though the nearest actual native pixel
+was clean and unmasked. Confirmed directly (`tmp_phase0/debug_nn_residual.py`):
+reproject's footprint computation is more conservative than "does the
+nearest native pixel exist and have a value" right at certain boundaries.
+
+Nearest-neighbour reprojection is trivial (`astropy.wcs.WCS.pixel_to_world`
++ `world_to_pixel` + round — both already provided by astropy, which we're
+still using exactly as intended; only `reproject`'s own black-box footprint
+logic was dropped), so implementing it directly gives full control and
+eliminates the disagreement by construction. `reproject` itself is no
+longer a dependency (backend/requirements.txt).
+
 ---
 
 ## Phases 1–4

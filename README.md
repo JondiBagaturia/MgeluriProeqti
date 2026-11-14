@@ -182,12 +182,29 @@ Given the choice, speed-to-first-frame won.
   assignments vary file to file). Their script had independently found
   and fixed the same bright-source-core masking bug - a point source's
   peak pixel trips *some* flag in nearly every exposure, and a longer bad
-  list meant nearly every target's own centre showed no data. Verified
-  live: Barnard's Star's centre is now unmasked in all 5 checked
-  exposures (was 0 of 361 before, across every detector). Genuine
-  saturation (R Draconis) is unaffected either way - its raw `IMAGE`
-  value is already `NaN` straight from SPHEREx's own pipeline, independent
-  of any mask.
+  list meant nearly every target's own centre showed no data.
+- Two more bugs surfaced and fixed while chasing the above to completion,
+  verified with `scripts/check_center_pixel_coverage.py` (a reusable
+  per-exposure audit - run it yourself against any target):
+  1. `reproject`'s own nearest-neighbor mode still disagreed with the
+     actual nearest pixel at some exposures' exact pixel-boundary
+     coordinates (its footprint said invalid when the nearest native
+     pixel plainly wasn't). Replaced with our own direct nearest-neighbor
+     (`app/pipeline.py`'s `reproject_nearest`, built on astropy's WCS
+     alone) - a deliberate, documented exception to the brief's "use
+     reproject, don't reimplement it" note (see PLAN.md).
+  2. The real root cause underneath that: the common output grid was
+     even-sized, so there was no single pixel exactly at the target's sky
+     position - it sat precisely on the boundary between four pixels.
+     Every "the target pixel" read in the app (crosshair, pixel readout,
+     light curve, spectrum) was therefore reading a pixel up to half a
+     native pixel away from the actual target. Fixed by forcing the grid
+     odd-sized, so the centre pixel is now exact everywhere.
+  After both: live-checked, the "reprojection edge effect" failure mode
+  is fully gone (0 occurrences, was 34 of 189 "missing" cases across all
+  6 detectors). What's left is ~100% genuine SPHEREx saturation/defects
+  (`IMAGE` already `NaN` in the raw file, same category as R Draconis) -
+  not fixable by any mask or reprojection choice on our end.
 
 ## What doesn't (yet)
 

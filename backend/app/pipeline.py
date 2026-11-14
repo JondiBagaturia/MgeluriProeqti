@@ -5,6 +5,14 @@ Flag bit names are read from each file's own FLAGS header (MSKNnnnn cards)
 rather than hard-coded — PLAN.md Phase 0 found the live bit assignments
 don't exactly match the brief's quick-reference table, so hard-coding would
 silently mask (or fail to mask) the wrong bits on some files.
+
+Reprojection is our own nearest-neighbour (reproject_nearest below), not
+the `reproject` package's `reproject_interp` - a deliberate, evidence-based
+exception to PLAN.md's "use reproject, don't reimplement it" architecture
+note. See reproject_nearest's docstring for the live-confirmed bug this
+replaced (its own nearest-neighbor mode zeroed the footprint at some
+exposures' pixel-boundary coordinates even though the actual nearest
+native pixel was clean).
 """
 from __future__ import annotations
 
@@ -17,7 +25,6 @@ import numpy as np
 from astropy.wcs import WCS, FITSFixedWarning
 from astropy.coordinates import SkyCoord
 import astropy.units as u
-from reproject import reproject_interp
 from scipy import ndimage
 
 from .irsa import Cutout, ImageRecord
@@ -101,8 +108,22 @@ def flag_contamination_summary(flags_data: np.ndarray, flag_names: dict[int, str
 # ---------------------------------------------------------------------------
 
 def make_target_wcs(coord: SkyCoord, fov_arcmin: float, pixel_scale_arcsec: float):
-    """A simple TAN grid centred on `coord`, sized to cover `fov_arcmin`."""
+    """A simple TAN grid centred on `coord`, sized to cover `fov_arcmin`.
+
+    npix is forced odd. An even-sized axis has no single centre pixel -
+    its geometric centre sits exactly on the boundary between two pixels
+    (confirmed live: for npix=30, the target landed at pixel coordinate
+    (14.5, 14.5), not on any integer pixel). Every piece of this app that
+    reads "the target pixel" (the crosshair, the pixel readout, the light
+    curve, the spectrum feature, and this very script's diagnostics) uses
+    shape[0]//2 as that pixel - which is only exactly correct when npix is
+    odd and crpix lands on an integer. Odd npix changes the FOV actually
+    delivered by at most one pixel's width (~6 arcsec) - negligible next
+    to getting "the target pixel" unambiguously right.
+    """
     npix = max(int(np.ceil(fov_arcmin * 60.0 / pixel_scale_arcsec)), 8)
+    if npix % 2 == 0:
+        npix += 1
     wcs = WCS(naxis=2)
     wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
     wcs.wcs.crval = [coord.ra.deg, coord.dec.deg]
@@ -126,6 +147,42 @@ class ProcessedCutout:
     contamination: dict[str, int]
     central_wavelength_um: Optional[float] = None
     bandwidth_um: Optional[float] = None
+
+
+def reproject_nearest(data_in: np.ndarray, wcs_in: WCS, wcs_out: WCS, shape_out: tuple[int, int]) -> np.ndarray:
+    """Nearest-neighbour reprojection, computed directly rather than via
+    `reproject.reproject_interp(..., order="nearest-neighbor")`.
+
+    Why not just use reproject's own nearest-neighbor mode: it was tried
+    first and still left a real discrepancy, confirmed live
+    (scripts/check_center_pixel_coverage.py +
+    tmp_phase0/debug_nn_residual.py): for several exposures, the output
+    pixel's nearest native pixel was clean and unmasked, but reproject's
+    *own* returned footprint was 0 at exactly that output pixel anyway -
+    its internal validity check is more conservative than "is the nearest
+    native pixel actually there", right at certain pixel-boundary
+    coordinates (e.g. input coords like (13.79, 13.56) - just inside a
+    pixel, not past any real edge).
+
+    This computes exactly what we actually want: for every output pixel,
+    find its sky position, map that to the nearest native pixel via the
+    *same* astropy WCS (SIP distortion handled identically either way),
+    and take that pixel's value - NaN and all, if it's masked. No
+    separate footprint heuristic to disagree with.
+    """
+    ny, nx = shape_out
+    yy, xx = np.mgrid[0:ny, 0:nx]
+    world = wcs_out.pixel_to_world(xx.ravel(), yy.ravel())
+    x_in, y_in = wcs_in.world_to_pixel(world)
+    xi = np.round(x_in).astype(np.int64)
+    yi = np.round(y_in).astype(np.int64)
+
+    h, w = data_in.shape
+    in_bounds = (xi >= 0) & (xi < w) & (yi >= 0) & (yi < h)
+
+    out = np.full(ny * nx, np.nan, dtype=np.float32)
+    out[in_bounds] = data_in[yi[in_bounds], xi[in_bounds]]
+    return out.reshape(shape_out)
 
 
 def central_wavelength(hdul, coord: SkyCoord) -> tuple[Optional[float], Optional[float]]:
@@ -166,8 +223,18 @@ def process_cutout(
     variance_masked = np.where(mask, np.nan, variance).astype(np.float32)
 
     in_wcs = WCS(hdul["IMAGE"].header)
-    reproj_image, _ = reproject_interp((corrected, in_wcs), target_wcs, shape_out=shape_out)
-    reproj_var, _ = reproject_interp((variance_masked, in_wcs), target_wcs, shape_out=shape_out)
+    # Our own nearest-neighbour (see reproject_nearest's docstring for why
+    # not reproject.reproject_interp's own nearest-neighbor mode): bilinear
+    # blends each output pixel from up to 4 native neighbours, so one
+    # masked (NaN) neighbour NaNs out an output pixel whose own nearest
+    # native pixel was perfectly clean, and reproject's nearest-neighbor
+    # mode still disagreed with the actual nearest pixel at some exposures'
+    # exact pixel-boundary coordinates (its own footprint said invalid
+    # when the nearest native pixel plainly wasn't). Confirmed live
+    # (scripts/check_center_pixel_coverage.py): both effects were real,
+    # non-trivial contributors to Barnard's Star's "missing centre" bug.
+    reproj_image = reproject_nearest(corrected, in_wcs, target_wcs, shape_out)
+    reproj_var = reproject_nearest(variance_masked, in_wcs, target_wcs, shape_out)
 
     wavelength_um, bandwidth_um = central_wavelength(hdul, target_coord)
 
