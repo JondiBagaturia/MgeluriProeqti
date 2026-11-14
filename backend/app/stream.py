@@ -10,6 +10,8 @@ the browser without waiting on a slow later one.
 """
 from __future__ import annotations
 
+import logging
+import time
 from typing import Iterator, Optional
 
 import numpy as np
@@ -28,6 +30,8 @@ from .pipeline import (
 from .encode import encode_frame, EncodedFrame
 from .config import get_config
 
+log = logging.getLogger(__name__)
+
 
 def stream_frames(
     resolved: ResolvedPosition,
@@ -35,8 +39,10 @@ def stream_frames(
     detectors: Optional[list[str]],
     mode: str,
 ) -> Iterator[EncodedFrame]:
+    t_start = time.time()
     records = find_images(resolved.coord, fov_arcmin=fov_arcmin, detectors=detectors)
     if not records:
+        log.info("request done: 0 images found, 0.0s")
         return
 
     if resolved.has_proper_motion:
@@ -59,8 +65,11 @@ def stream_frames(
 
     pending: dict[int, dict[int, ProcessedCutout]] = {gi: {} for gi in range(len(groups))}
     emitted: set[int] = set()
+    n_fetched = 0
+    n_frames_emitted = 0
 
     for cutout in fetch_cutouts(records, centred_coord, fov_arcmin=fov_arcmin):
+        n_fetched += 1
         p = process_cutout(cutout, centred_coord, target_wcs, shape_out)
         ridx = index_of_record[id(cutout.record)]
         gi = record_to_group[id(cutout.record)]
@@ -69,6 +78,7 @@ def stream_frames(
         if gi not in emitted and set(pending[gi].keys()) >= needed[gi]:
             emitted.add(gi)
             members = [pending[gi][i] for i in sorted(pending[gi].keys())]
+            n_frames_emitted += 1
             yield _combine_and_encode(gi, len(groups), members)
 
     # Groups that never fully completed (some fetch(es) failed after
@@ -78,7 +88,17 @@ def stream_frames(
     for gi in range(len(groups)):
         if gi not in emitted and pending[gi]:
             members = [pending[gi][i] for i in sorted(pending[gi].keys())]
+            n_frames_emitted += 1
             yield _combine_and_encode(gi, len(groups), members, partial=True)
+
+    log.info(
+        "request done: %d image(s) found, %d fetched, %d dropped, %d frame(s) emitted, %.1fs total",
+        len(records),
+        n_fetched,
+        len(records) - n_fetched,
+        n_frames_emitted,
+        time.time() - t_start,
+    )
 
 
 def _combine_and_encode(
