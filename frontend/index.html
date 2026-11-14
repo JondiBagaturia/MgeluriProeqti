@@ -84,6 +84,14 @@
     </section>
 
     <section>
+      <h2>Spectrum <span class="status-text">(bonus)</span></h2>
+      <p class="status-text">Click a pixel in the viewer for flux vs wavelength at that exact position, across all 6 detectors — forced photometry at one pixel, not PSF-fitted. Slow: it re-queries IRSA for that position.</p>
+      <canvas id="spectrum-canvas" width="260" height="120"></canvas>
+      <p id="spectrum-status" class="status-text"></p>
+      <p class="status-text">Compare with IRSA's <a href="https://irsa.ipac.caltech.edu/applications/spherex/tool-spectrophotometry" target="_blank" rel="noopener">official Spectrophotometry Tool</a>.</p>
+    </section>
+
+    <section>
       <h2>Cache</h2>
       <p id="cache-status" class="status-text">—</p>
       <button type="button" id="clear-cache-btn">Clear cache</button>

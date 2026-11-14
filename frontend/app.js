@@ -58,6 +58,9 @@
   const contaminationSummary = $("contamination-summary");
   const lightcurveCanvas = $("lightcurve-canvas");
   const lightcurveCtx = lightcurveCanvas.getContext("2d");
+  const spectrumCanvas = $("spectrum-canvas");
+  const spectrumCtx = spectrumCanvas.getContext("2d");
+  const spectrumStatus = $("spectrum-status");
 
   const offscreen = document.createElement("canvas");
   const offscreenCtx = offscreen.getContext("2d");
@@ -640,34 +643,96 @@
   // ---------------------------------------------------------------------
   // Pixel readout (approximate tangent-plane RA/Dec from the known centre)
   // ---------------------------------------------------------------------
-  canvas.addEventListener("mousemove", (ev) => {
+  /** Map a mouse event on #viewer-canvas to {px, py, ra, dec, phys} in the
+   * currently-rendered grid, or null if the cursor is outside it / there's
+   * nothing rendered yet. Shared by the hover readout and the spectrum
+   * click handler below. */
+  function pixelAtEvent(ev) {
     const grid = state.lastRenderedGrid;
-    if (!grid || !state.resolvedCoord) return;
+    if (!grid || !state.resolvedCoord) return null;
     const rect = canvas.getBoundingClientRect();
     const canvasX = ((ev.clientX - rect.left) / rect.width) * canvas.width;
     const canvasY = ((ev.clientY - rect.top) / rect.height) * canvas.height;
     const zoom = parseInt(zoomSlider.value, 10);
     const px = Math.floor(canvasX / zoom);
     const py = Math.floor(canvasY / zoom);
-    if (px < 0 || py < 0 || px >= grid.width || py >= grid.height) {
-      pixelReadout.textContent = "";
-      return;
-    }
-    const idx = py * grid.width + px;
-    const phys = grid.values[idx];
+    if (px < 0 || py < 0 || px >= grid.width || py >= grid.height) return null;
+
     const pixelScaleArcsec = (state.fovArcmin * 60) / grid.width;
     const dx = (px - grid.width / 2) * pixelScaleArcsec;
     const dy = (grid.height / 2 - py) * pixelScaleArcsec;
     const decRad = (state.resolvedCoord.dec * Math.PI) / 180;
     const ra = state.resolvedCoord.ra - dx / 3600 / Math.cos(decRad);
     const dec = state.resolvedCoord.dec + dy / 3600;
-    if (!Number.isFinite(phys)) {
-      pixelReadout.textContent = `RA ${ra.toFixed(5)}  Dec ${dec.toFixed(5)}   no data`;
-    } else {
-      pixelReadout.textContent = `RA ${ra.toFixed(5)}  Dec ${dec.toFixed(5)}   flux ${phys.toFixed(4)} MJy/sr`;
+    const phys = grid.values[py * grid.width + px];
+    return { px, py, ra, dec, phys };
+  }
+
+  canvas.addEventListener("mousemove", (ev) => {
+    const hit = pixelAtEvent(ev);
+    if (!hit) {
+      pixelReadout.textContent = "";
+      return;
     }
+    pixelReadout.textContent = Number.isFinite(hit.phys)
+      ? `RA ${hit.ra.toFixed(5)}  Dec ${hit.dec.toFixed(5)}   flux ${hit.phys.toFixed(4)} MJy/sr`
+      : `RA ${hit.ra.toFixed(5)}  Dec ${hit.dec.toFixed(5)}   no data`;
   });
   canvas.addEventListener("mouseleave", () => (pixelReadout.textContent = ""));
+
+  // ---------------------------------------------------------------------
+  // Spectrum (Phase 4, bonus): click a pixel -> flux vs wavelength
+  // ---------------------------------------------------------------------
+  canvas.addEventListener("click", (ev) => {
+    const hit = pixelAtEvent(ev);
+    if (!hit) return;
+    fetchAndDrawSpectrum(hit.ra, hit.dec);
+  });
+
+  async function fetchAndDrawSpectrum(ra, dec) {
+    spectrumStatus.textContent = "Fetching spectrum from IRSA (re-queries all 6 detectors — this takes a while)…";
+    spectrumCtx.clearRect(0, 0, spectrumCanvas.width, spectrumCanvas.height);
+    try {
+      const url = `${API_BASE}/api/spectrum?position=${ra.toFixed(6)},${dec.toFixed(6)}&fov=${state.fovArcmin}`;
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error(`server error (${resp.status})`);
+      const points = await resp.json();
+      drawSpectrum(points);
+      const nGood = points.filter((p) => p.flux != null).length;
+      spectrumStatus.textContent = nGood
+        ? `${nGood} of ${points.length} exposure(s) usable at RA ${ra.toFixed(4)}, Dec ${dec.toFixed(4)}.`
+        : `No unmasked flux found at RA ${ra.toFixed(4)}, Dec ${dec.toFixed(4)} — too faint, or always flagged.`;
+    } catch (e) {
+      spectrumStatus.textContent = `Spectrum failed: ${e.message}`;
+    }
+  }
+
+  function drawSpectrum(points) {
+    const w = spectrumCanvas.width;
+    const h = spectrumCanvas.height;
+    spectrumCtx.clearRect(0, 0, w, h);
+    const good = points.filter((p) => p.flux != null && p.wavelength_um != null);
+    if (good.length === 0) return;
+
+    const wMin = Math.min(...good.map((p) => p.wavelength_um));
+    const wMax = Math.max(...good.map((p) => p.wavelength_um));
+    const fMin = Math.min(...good.map((p) => p.flux));
+    const fMax = Math.max(...good.map((p) => p.flux));
+    const tMin = Math.min(...good.map((p) => p.time_mjd));
+    const tMax = Math.max(...good.map((p) => p.time_mjd)) || tMin + 1;
+    const pad = 14;
+    const xOf = (wl) => pad + ((wl - wMin) / (wMax - wMin || 1)) * (w - 2 * pad);
+    const yOf = (f) => h - pad - ((f - fMin) / (fMax - fMin || 1)) * (h - 2 * pad);
+
+    for (const p of good) {
+      // Coloured by epoch (time), per the brief: blue (early) -> red (late).
+      const hue = 220 - 220 * ((p.time_mjd - tMin) / (tMax - tMin || 1));
+      spectrumCtx.fillStyle = `hsl(${hue}, 80%, 60%)`;
+      spectrumCtx.beginPath();
+      spectrumCtx.arc(xOf(p.wavelength_um), yOf(p.flux), 2.5, 0, 2 * Math.PI);
+      spectrumCtx.fill();
+    }
+  }
 
   // ---------------------------------------------------------------------
   // Playback

@@ -106,6 +106,7 @@ fieldset {
 }
 fieldset label { display: inline-block; width: 48%; margin: 2px 0; font-size: 12.5px; }
 .warning { color: var(--warn); font-size: 12px; margin: 0 0 8px; }
+#spectrum-canvas { width: 100%; height: 120px; display: block; background: #0f1420; border-radius: 4px; margin: 6px 0; }
 button#clear-cache-btn {
   background: #2a3346;
   color: var(--text);

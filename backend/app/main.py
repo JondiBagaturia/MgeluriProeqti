@@ -18,6 +18,7 @@ from starlette.concurrency import run_in_threadpool
 from .coords import parse_position, CoordParseError, ResolvedPosition
 from .irsa import find_images, discover_collections, DiscoveryError
 from .stream import stream_frames
+from .spectrum import compute_spectrum
 from .cache import TTLDedupeCache
 from .config import get_config
 
@@ -158,6 +159,39 @@ async def frames(
     return StreamingResponse(
         generate(),
         media_type="application/x-ndjson",
+        headers={"Cache-Control": "public, max-age=300"},
+    )
+
+
+@app.get("/api/spectrum")
+async def spectrum(
+    position: str = Query(..., description="RA/Dec or object name - the exact clicked pixel, not necessarily the search target"),
+    fov: Optional[float] = Query(None, description="arcmin"),
+    detectors: Optional[str] = Query(None, description="Comma-separated; omit for all 6 (the point of a spectrum)"),
+):
+    """Phase 4 (bonus): forced photometry at one position across every
+    matching cutout, native-pixel and native-wavelength per exposure (see
+    app/spectrum.py) - not reprojected, so proper motion is applied at each
+    exposure's own epoch rather than a shared mean epoch like /api/frames."""
+    resolved = await run_in_threadpool(_resolve_or_400, position)
+    fov_arcmin = _validate_fov(fov)
+    det_list = _parse_detectors(detectors)
+    try:
+        points = await run_in_threadpool(compute_spectrum, resolved, fov_arcmin, det_list)
+    except DiscoveryError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return JSONResponse(
+        [
+            {
+                "time_mjd": p.time_mjd,
+                "detector": p.detector,
+                "wavelength_um": p.wavelength_um,
+                "bandwidth_um": p.bandwidth_um,
+                "flux": p.flux,
+                "masked": p.masked,
+            }
+            for p in points
+        ],
         headers={"Cache-Control": "public, max-age=300"},
     )
 
