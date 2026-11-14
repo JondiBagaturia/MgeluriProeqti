@@ -124,13 +124,13 @@
   // ---------------------------------------------------------------------
   function readUrlState() {
     const params = new URLSearchParams(location.search);
-    const quality = params.get("quality") || "high";
+    const quality = params.get("quality") || "mid";
     return {
       position: params.get("position") || "",
       fov: parseFloat(params.get("fov")) || 5,
       detectors: (params.get("detectors") || "D2,D6").split(",").filter(Boolean),
       mode: params.get("mode") || "epoch",
-      quality: QUALITY_LEVELS.includes(quality) ? quality : "high",
+      quality: QUALITY_LEVELS.includes(quality) ? quality : "mid",
     };
   }
 
@@ -465,26 +465,6 @@
     return { black: pct(blackPct), white: pct(whitePct) };
   }
 
-  /** Robust, symmetric levels for Difference mode: a threshold on
-   * |value|, used as both -black and +white. Real bug this fixes: a
-   * difference array is centred near 0 but, with the wider flag mask
-   * (needed to fix the "target's own pixel always NaN" bug), has much
-   * more raw pixel-to-pixel noise than before. computeLevels' normal
-   * median/99.8th-percentile split is a *signed* range that's extremely
-   * sensitive to that - the noise floor ends up comparable to the white
-   * point, so nearly every noisy pixel saturates toward one extreme or
-   * the other (looks like static). The backend's own smoke-test renderer
-   * (scripts/smoke_test.py) avoids exactly this by clipping symmetrically
-   * on the 99th percentile of |difference| - ported here. `pct` (0-100)
-   * is driven by the white-point slider, so it's still user-adjustable. */
-  function computeSymmetricLevels(finiteValues, pct) {
-    if (finiteValues.length === 0) return { black: -1, white: 1 };
-    const absSorted = Array.from(finiteValues, Math.abs).sort((a, b) => a - b);
-    const idx = Math.min(absSorted.length - 1, Math.max(0, Math.floor((pct / 100) * (absSorted.length - 1))));
-    const threshold = absSorted[idx] || 1e-9;
-    return { black: -threshold, white: threshold };
-  }
-
   function stretchValue(phys, black, white, mode, invert) {
     let t;
     const range = white - black || 1e-9;
@@ -538,7 +518,7 @@
       const vb = physicalValuesForFrame(b);
       const diff = new Float32Array(va.length);
       for (let i = 0; i < diff.length; i++) diff[i] = vb[i] - va[i]; // NaN propagates if either side is NaN
-      renderGrid(a.width, a.height, diff, { useGlobalAsinhLevels: false, symmetric: true });
+      renderGrid(a.width, a.height, diff, { useGlobalAsinhLevels: false });
       frameLabel.textContent =
         `Difference: epoch @ ${fmtDate(b.timeMjdMean)}  −  epoch @ ${fmtDate(a.timeMjdMean)}\n` +
         `A moving/variable source shows as a dark/bright dipole pair.`;
@@ -566,29 +546,31 @@
     }
     updateContaminationSummary();
   }
-  function renderGrid(width, height, values, { useGlobalAsinhLevels = true, symmetric = false } = {}) {
+  function renderGrid(width, height, values, { useGlobalAsinhLevels = true } = {}) {
     state.lastRenderedGrid = { width, height, values };
     const mode = stretchSelect.value;
-    const whitePct = parseFloat(whiteSlider.value);
 
+    // Asinh's levels come from every loaded frame combined (see
+    // recomputeGlobalFiniteValues) ONLY for the plain blink view - those
+    // are raw per-epoch flux values (roughly 0..300 MJy/sr). Difference
+    // and Sum pass useGlobalAsinhLevels:false because their arrays are a
+    // different quantity entirely (differences centred near 0, including
+    // negatives; sums on a different scale) - using the blink levels on
+    // those made the display look badly broken (everything clipped to
+    // one extreme, since the white point was calibrated for raw flux, not
+    // for small +/- differences). Falls back to this grid's own values if
+    // the global cache is somehow empty.
     let physValues;
-    if (!symmetric && mode === "asinh" && useGlobalAsinhLevels && state.globalFiniteValues && state.globalFiniteValues.length) {
-      // Asinh's levels come from every loaded frame combined (see
-      // recomputeGlobalFiniteValues) ONLY for the plain blink view - those
-      // are raw per-epoch flux values (roughly 0..300 MJy/sr).
+    if (mode === "asinh" && useGlobalAsinhLevels && state.globalFiniteValues && state.globalFiniteValues.length) {
       physValues = state.globalFiniteValues;
     } else {
       physValues = [];
       for (let i = 0; i < values.length; i++) if (Number.isFinite(values[i])) physValues.push(values[i]);
     }
 
-    // Difference mode passes symmetric:true - see computeSymmetricLevels's
-    // docstring for why its own signed-array percentile split looked
-    // broken (static-like noise) once the flag mask was widened.
     const blackPct = parseFloat(blackSlider.value);
-    const { black, white } = symmetric
-      ? computeSymmetricLevels(physValues, whitePct)
-      : computeLevels(physValues, mode, blackPct, whitePct);
+    const whitePct = parseFloat(whiteSlider.value);
+    const { black, white } = computeLevels(physValues, mode, blackPct, whitePct);
     const invert = invertCheckbox.checked;
 
     const rgba = new Uint8ClampedArray(width * height * 4);

@@ -33,22 +33,12 @@ quality:
   # detector_epoch mode) - capped before fetching, not after, since the
   # fetch itself is ~97% of request time (see app/stream.py's timing
   # report). Evenly spaced across the group, so the full time baseline is
-  # kept either way; only the S/N of the stack changes. 0/null = no cap.
-  #
-  # Default is "high" (uncapped): the acceptance-target reference images
-  # in examples/ were all generated uncapped (scripts/smoke_test.py has
-  # no concept of a cap), and Difference mode in particular is much more
-  # sensitive to the extra noise than plain Blink viewing is - subtracting
-  # two already-noisier stacks roughly doubles the visible noise. A real
-  # bug report ("difference mode looks whacky") traced back to exactly
-  # this: Mid's reduced exposure count, not the flag-mask/reprojection/
-  # pixel-scale fixes from the same session, which checked out fine when
-  # regenerated uncapped. Low/Mid stay available as an explicit opt-in for
-  # users who want the speed trade-off.
+  # kept either way; only the S/N of the stack changes. 0/null = no cap
+  # (today's full-quality behaviour).
   low: 5
   mid: 15
   high: 0
-  default: high
+  default: mid
 
 detectors:
   # D1..D6, linear variable filters (see SPHEREx_tool_prompt.md). Default

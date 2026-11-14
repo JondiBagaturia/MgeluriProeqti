@@ -184,23 +184,6 @@ Given the choice, speed-to-first-frame won.
   Those two modes now compute their own levels from their own array, the
   same way Linear/Zscale always did - only the plain blink view uses the
   shared global levels.
-- Fixed (round 2): even after the above, Difference mode still looked like
-  TV static on some targets. Cause was a different bug: Asinh's own level
-  computation (a signed median/99.8th-percentile split) is very sensitive
-  to noise once it's centred near zero, which a difference array always
-  is. Replaced with a `computeSymmetricLevels()` that takes a robust
-  percentile of `|value|` instead, symmetric around zero - used for both
-  Difference and Sum.
-- Fixed (round 3): Difference mode could still show a faint, off-centre
-  blob instead of a clean dipole at the target. Not a math/fetch bug -
-  confirmed by regenerating the original acceptance-test reference image
-  with every pipeline change in place (flag mask, reprojection, pixel
-  scale) and getting the same clean result. The actual cause was the
-  Quality slider (above) defaulting to Mid: subtracting two already-15-
-  exposure stacks roughly doubles the visible noise relative to the
-  all-exposures reference images in `examples/`. Default is now **High**
-  (uncapped) in both the backend config and the UI slider; Low/Mid stay
-  available as an explicit speed trade-off.
 - Output grid pixel scale matched to theirs too: SPHEREx's real native
   pixel scale is 6.15″/px (confirmed from IRSA's own SIA metadata), but
   their script's output grid is 3.075″/px - exactly half, i.e. roughly 4×
