@@ -175,9 +175,19 @@ Given the choice, speed-to-first-frame won.
   `phase1-check/phase1/blink.py`): astropy's `AsinhStretch(a=0.05)` with
   levels fixed at the median/99.8th percentile across every loaded frame
   (not recomputed per frame, so contrast stays consistent through the
-  blink), plus its red/salmon gapped crosshair. Their script independently
-  found and fixed the same bright-source-core masking bug documented
-  below, which is a good independent sanity check on both of our pipelines.
+  blink), plus its red/salmon gapped crosshair.
+- The default flag mask now matches their `stack.py` exactly: only
+  `NONFUNC`/`MISSING_DATA`/`HOT`/`COLD` are treated as bad (read by name,
+  not their hard-coded bit numbers, per PLAN.md's finding that bit
+  assignments vary file to file). Their script had independently found
+  and fixed the same bright-source-core masking bug - a point source's
+  peak pixel trips *some* flag in nearly every exposure, and a longer bad
+  list meant nearly every target's own centre showed no data. Verified
+  live: Barnard's Star's centre is now unmasked in all 5 checked
+  exposures (was 0 of 361 before, across every detector). Genuine
+  saturation (R Draconis) is unaffected either way - its raw `IMAGE`
+  value is already `NaN` straight from SPHEREx's own pipeline, independent
+  of any mask.
 
 ## What doesn't (yet)
 

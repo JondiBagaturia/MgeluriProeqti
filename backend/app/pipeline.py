@@ -32,22 +32,26 @@ from .irsa import Cutout, ImageRecord
 warnings.filterwarnings("ignore", category=FITSFixedWarning, message=".*SIP.*")
 logging.getLogger("astropy").setLevel(logging.ERROR)
 
-# These are informational, not defects — never mask by default even
-# though they're real bits in the FLAGS header.
+# Only these four are treated as genuinely bad by default - matches a
+# teammate's independent "planet-x" renderer exactly
+# (phase1/stack.py: `BAD = sum(1 << b for b in (6, 9, 10, 11))`,
+# i.e. NONFUNC/MISSING_DATA/HOT/COLD by name, read dynamically here rather
+# than by their hard-coded bit numbers per PLAN.md's finding that bit
+# assignments vary file to file).
 #
-# TRANSIENT and HALO were added after a real bug report: Barnard's Star
-# (not even an especially bright target) showed a "no data" hole right at
-# its own brightest pixels. Traced it directly - its core (flux ~1000x the
-# surrounding sky in one exposure) is flagged TRANSIENT + HALO, because a
-# bright source's fast-changing signal during up-the-ramp sampling looks
-# like a transient event to that automated flag - not because the pixel is
-# actually bad. Masking it was throwing away exactly the data users most
-# want to see. OVERFLOW/SUR_ERROR stay masked - those describe genuine
-# saturation/onboard-processing defects (confirmed separately on R Draconis,
-# which saturates for real: OVERFLOW+BLOOM, no TRANSIENT/HALO involved).
-# This is a judgement call about flag semantics, not something IRSA's docs
-# spell out explicitly - flagged here if it needs revisiting.
-ALWAYS_SAFE_FLAG_NAMES = {"SOURCE", "FULLSAMPLE", "TRANSIENT", "HALO"}
+# Everything else - TRANSIENT, OVERFLOW, SUR_ERROR, BLOOM, GHOST*, STREAK,
+# PERSIST, CROSSTALK, DICHROIC, PHANMISS, NONLINEAR, OUTLIER, SNOWBALL,
+# HALO, SATELLITE_HALO - is left unmasked by default, same as their
+# script. The original, narrower safe-list here (just TRANSIENT/HALO) was
+# a first attempt that still left a real-bug-report hole: Barnard's Star
+# (not even an especially bright target) showed "no data" at its own
+# brightest pixel in every exposure, every detector, because ~20 "bad"
+# bits were all disqualifying and a point source's peak is statistically
+# likely to trip at least one. Their teammate's wider list fixes it fully.
+# Genuine saturation (R Draconis: OVERFLOW+BLOOM) still shows as NaN
+# regardless of this list, because SPHEREx's own Level-2 pipeline already
+# blanks the raw IMAGE value there - independent of any flag we mask on.
+DEFAULT_BAD_FLAG_NAMES = {"NONFUNC", "MISSING_DATA", "HOT", "COLD"}
 
 
 # ---------------------------------------------------------------------------
@@ -68,7 +72,7 @@ def read_flag_names(flags_header) -> dict[int, str]:
 
 
 def default_bad_bits(flag_names: dict[int, str]) -> set[int]:
-    return {bit for bit, name in flag_names.items() if name not in ALWAYS_SAFE_FLAG_NAMES}
+    return {bit for bit, name in flag_names.items() if name in DEFAULT_BAD_FLAG_NAMES}
 
 
 def build_mask(flags_data: np.ndarray, bad_bits: set[int]) -> np.ndarray:
@@ -282,22 +286,19 @@ def fill_small_gaps(image: np.ndarray, max_hole_pixels: int = 6) -> tuple[np.nda
 
     Real bug this exists for: a live check (all 6 detectors, Barnard's
     Star - not an especially bright target) found SPHEREx's own automated
-    flagging masks the exact peak pixel of a point source in 100% of
-    exposures, every detector, every epoch - sometimes OVERFLOW/BLOOM
-    (genuine saturation), but just as often TRANSIENT/HALO/GHOST/etc on an
-    exposure that isn't saturated at all. The result: the combined stack
-    shows a literal black hole at the exact centre of every single target
-    you search for, surrounded by otherwise-valid flux. Masking individual
-    flags more leniently doesn't fully fix it (see ALWAYS_SAFE_FLAG_NAMES's
-    comment) because *some* real flag trips on nearly every exposure.
-
-    Filling only small holes (<= max_hole_pixels, after combining across
-    every available exposure) is the conservative middle ground: a large
-    masked region (a real bad column, a saturated extended source, a
-    satellite streak) is left alone - only a small, bounded gap like this
-    one gets a locally-interpolated value. Returns (filled_image,
-    n_pixels_filled) so callers can report this honestly rather than
-    silently manufacturing data.
+    flagging marks the exact peak pixel of a point source in 100% of
+    exposures, every detector, every epoch, with some flag or other. With
+    DEFAULT_BAD_FLAG_NAMES now matched to the narrower "planet-x" list
+    (see that constant's comment), this is now rare - but genuine
+    saturation (OVERFLOW+BLOOM, e.g. R Draconis) still blanks the raw
+    IMAGE value itself, independent of any mask, so a small hole is still
+    possible. Filling only small holes (<= max_hole_pixels, after
+    combining across every available exposure) is the conservative middle
+    ground: a large masked region (a real bad column, a saturated
+    extended source, a satellite streak) is left alone - only a small,
+    bounded gap like this one gets a locally-interpolated value. Returns
+    (filled_image, n_pixels_filled) so callers can report this honestly
+    rather than silently manufacturing data.
     """
     nan_mask = ~np.isfinite(image)
     if not nan_mask.any():
