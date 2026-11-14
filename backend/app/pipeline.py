@@ -212,6 +212,27 @@ def group_indices(records: list[ImageRecord], mode: str, gap_days: float = 45.0)
     return [groups[k] for k in ordered_keys]
 
 
+def cap_group_indices(idxs: list[int], max_count: Optional[int]) -> list[int]:
+    """Subsample one group's (time-ordered) indices down to at most
+    `max_count`, evenly spaced across the group rather than just the first
+    N - that keeps the full time baseline (first and last exposure are
+    always kept) instead of silently biasing toward one end of the epoch.
+    `max_count` of None or <=0 means no cap (current behaviour, unchanged).
+
+    This exists to cut download count+bytes *before* fetching - that's
+    where ~97% of request time goes (see app/stream.py's timing report),
+    not in reprojecting or combining - so capping here, rather than after
+    fetch, is what actually buys speed.
+    """
+    if not max_count or len(idxs) <= max_count:
+        return idxs
+    if max_count == 1:
+        return [idxs[len(idxs) // 2]]
+    step = (len(idxs) - 1) / (max_count - 1)
+    picked = sorted({idxs[round(k * step)] for k in range(max_count)})
+    return picked
+
+
 # ---------------------------------------------------------------------------
 # Combination
 # ---------------------------------------------------------------------------

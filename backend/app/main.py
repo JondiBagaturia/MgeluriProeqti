@@ -134,19 +134,25 @@ async def frames(
     fov: Optional[float] = Query(None, description="arcmin"),
     detectors: Optional[str] = Query(None, description="Comma-separated, e.g. D6,D2"),
     group: str = Query("epoch", pattern="^(epoch|detector_epoch|single)$"),
+    quality: Optional[str] = Query(None, pattern="^(low|mid|high)$", description="Max exposures/group: low=fast, high=full quality"),
 ):
     """NDJSON stream: one processed, combined frame per line, as soon as
     each is ready. Each line carries width/height/scale/offset + a base64
-    uint16 payload + metadata — the browser does all stretching client-side."""
+    uint16 payload + metadata — the browser does all stretching client-side.
+
+    `quality` trades S/N for speed by capping exposures fetched per group
+    (see app/pipeline.py's cap_group_indices) - applied before fetching,
+    since that's ~97% of request time, not after."""
     t0 = time.time()
     resolved = await run_in_threadpool(_resolve_or_400, position)
     resolve_seconds = time.time() - t0
     fov_arcmin = _validate_fov(fov)
     det_list = _parse_detectors(detectors)
+    max_exposures = get_config().quality.max_exposures(quality)
 
     def generate():
         try:
-            for encoded in stream_frames(resolved, fov_arcmin, det_list, group, resolve_seconds):
+            for encoded in stream_frames(resolved, fov_arcmin, det_list, group, resolve_seconds, max_exposures):
                 line = {
                     "width": encoded.width,
                     "height": encoded.height,

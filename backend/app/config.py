@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from functools import lru_cache
+from typing import Optional
 import yaml
 
 # repo_root/backend/app/config.py -> repo_root/config/collections.yaml
@@ -50,6 +51,18 @@ class SimbadConfig:
 
 
 @dataclass(frozen=True)
+class QualityConfig:
+    """Max exposures fetched per group, by preset name. 0/None = no cap."""
+
+    presets: dict  # {"low": 5, "mid": 15, "high": 0}
+    default: str
+
+    def max_exposures(self, name: Optional[str]) -> Optional[int]:
+        value = self.presets.get(name or self.default, self.presets[self.default])
+        return value if value else None
+
+
+@dataclass(frozen=True)
 class Config:
     irsa: IrsaConfig
     simbad: SimbadConfig
@@ -58,6 +71,7 @@ class Config:
     wavelength_um: dict = field(default_factory=dict)
     fov: FovConfig = None
     fetch: FetchConfig = None
+    quality: QualityConfig = None
     pixel_scale_arcsec: float = 6.15
 
 
@@ -84,6 +98,11 @@ def get_config() -> Config:
         backoff_base_s=raw["fetch"]["backoff_base_s"],
         retry_status_codes=tuple(raw["fetch"]["retry_status_codes"]),
     )
+    quality_raw = raw.get("quality", {})
+    quality = QualityConfig(
+        presets={k: v for k, v in quality_raw.items() if k != "default"},
+        default=quality_raw.get("default", "high"),
+    )
     return Config(
         irsa=irsa,
         simbad=simbad,
@@ -92,5 +111,6 @@ def get_config() -> Config:
         wavelength_um=raw["detectors"]["wavelength_um"],
         fov=fov,
         fetch=fetch,
+        quality=quality,
         pixel_scale_arcsec=raw["pixel_scale_arcsec"],
     )

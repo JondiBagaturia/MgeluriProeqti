@@ -23,6 +23,7 @@ from .pipeline import (
     make_target_wcs,
     process_cutout,
     group_indices,
+    cap_group_indices,
     combine_inverse_variance,
     Frame,
     ProcessedCutout,
@@ -39,6 +40,7 @@ def stream_frames(
     detectors: Optional[list[str]],
     mode: str,
     resolve_seconds: float = 0.0,
+    max_exposures_per_group: Optional[int] = None,
 ) -> Iterator[EncodedFrame]:
     t_start = time.time()
     stats = _TimingStats(resolve_s=resolve_seconds)
@@ -60,14 +62,26 @@ def stream_frames(
     cfg = get_config()
     target_wcs, shape_out = make_target_wcs(centred_coord, fov_arcmin, cfg.pixel_scale_arcsec)
 
-    groups = group_indices(records, mode=mode)
+    groups_full = group_indices(records, mode=mode)
+    # Cap *before* fetching, not after - the timing report showed ~97% of
+    # request time is the fetch itself, so trimming here (not just at
+    # combine time) is what actually buys speed. Evenly-spaced subsample
+    # keeps the full time baseline (first/last exposure always kept)
+    # rather than silently biasing toward one end of the epoch.
+    groups = [cap_group_indices(idxs, max_exposures_per_group) for idxs in groups_full]
+
     record_to_group = {}
     needed = {}
+    needed_indices: set[int] = set()
     for gi, idxs in enumerate(groups):
         needed[gi] = set(idxs)
+        needed_indices.update(idxs)
         for i in idxs:
             record_to_group[id(records[i])] = gi
-    index_of_record = {id(r): i for i, r in enumerate(records)}
+    index_of_record = {id(records[i]): i for i in needed_indices}
+
+    records_to_fetch = [records[i] for i in sorted(needed_indices)]
+    stats.n_images_capped_out = len(records) - len(records_to_fetch)
 
     pending: dict[int, dict[int, ProcessedCutout]] = {gi: {} for gi in range(len(groups))}
     emitted: set[int] = set()
@@ -75,7 +89,7 @@ def stream_frames(
     n_frames_emitted = 0
 
     t_fetch_start = time.time()
-    for cutout in fetch_cutouts(records, centred_coord, fov_arcmin=fov_arcmin):
+    for cutout in fetch_cutouts(records_to_fetch, centred_coord, fov_arcmin=fov_arcmin):
         n_fetched += 1
         stats.record_fetch(cutout)
 
@@ -118,6 +132,7 @@ class _TimingStats:
         self.resolve_s = resolve_s
         self.discover_s = 0.0
         self.n_images_found = 0
+        self.n_images_capped_out = 0
         self.fetch_wall_s = 0.0
         self.fetch_bytes_total = 0
         self.fetch_seconds_sum = 0.0  # sum of individual successful fetches
@@ -141,7 +156,7 @@ class _TimingStats:
         log.info(
             "request timing report:\n"
             "  resolve (SIMBAD/Sesame): %.2fs\n"
-            "  discover (SIA query):    %.2fs -> %d image(s) found\n"
+            "  discover (SIA query):    %.2fs -> %d image(s) found, %d skipped by quality cap\n"
             "  fetch cutouts:            %.1fs wall-clock, %d ok, %.1f MB total, "
             "sum-of-individual=%.1fs (~%.1fx effective parallelism), slowest=%s %.1fs\n"
             "  reproject (align):        %.2fs total (%.3fs/image avg)\n"
@@ -151,6 +166,7 @@ class _TimingStats:
             self.resolve_s,
             self.discover_s,
             self.n_images_found,
+            self.n_images_capped_out,
             self.fetch_wall_s,
             n_fetched,
             mb,

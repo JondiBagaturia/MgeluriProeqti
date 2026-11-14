@@ -28,6 +28,18 @@ simbad:
     - "https://simbad.harvard.edu/simbad/sim-tap"
     - "https://simbad.cds.unistra.fr/simbad/sim-tap"
 
+quality:
+  # Max exposures fetched *per group* (epoch, or epoch+detector in
+  # detector_epoch mode) - capped before fetching, not after, since the
+  # fetch itself is ~97% of request time (see app/stream.py's timing
+  # report). Evenly spaced across the group, so the full time baseline is
+  # kept either way; only the S/N of the stack changes. 0/null = no cap
+  # (today's full-quality behaviour).
+  low: 5
+  mid: 15
+  high: 0
+  default: mid
+
 detectors:
   # D1..D6, linear variable filters (see SPHEREx_tool_prompt.md). Default
   # subset for a new query — chosen for speed, user can add more.

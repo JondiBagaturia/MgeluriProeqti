@@ -24,6 +24,10 @@
   const fovWarning = $("fov-warning");
   const modeSelect = $("mode-select");
   const detectorFieldset = $("detector-fieldset");
+  const qualitySlider = $("quality-slider");
+  const qualityValue = $("quality-value");
+  const QUALITY_LEVELS = ["low", "mid", "high"];
+  const QUALITY_LABELS = ["Low (fastest)", "Mid (balanced)", "High (full quality)"];
   const stretchSelect = $("stretch-select");
   const blackSlider = $("black-slider");
   const whiteSlider = $("white-slider");
@@ -118,20 +122,23 @@
   // ---------------------------------------------------------------------
   function readUrlState() {
     const params = new URLSearchParams(location.search);
+    const quality = params.get("quality") || "mid";
     return {
       position: params.get("position") || "",
       fov: parseFloat(params.get("fov")) || 5,
       detectors: (params.get("detectors") || "D2,D6").split(",").filter(Boolean),
       mode: params.get("mode") || "epoch",
+      quality: QUALITY_LEVELS.includes(quality) ? quality : "mid",
     };
   }
 
-  function writeUrlState({ position, fov, detectors, mode }) {
+  function writeUrlState({ position, fov, detectors, mode, quality }) {
     const params = new URLSearchParams();
     params.set("position", position);
     params.set("fov", fov);
     params.set("detectors", detectors.join(","));
     params.set("mode", mode);
+    params.set("quality", quality);
     const url = `${location.pathname}?${params.toString()}`;
     history.replaceState(null, "", url);
     const fullUrl = location.origin + url;
@@ -145,6 +152,9 @@
   fovSlider.addEventListener("input", () => {
     fovValue.textContent = `${fovSlider.value}′`;
     fovWarning.hidden = parseFloat(fovSlider.value) <= 15;
+  });
+  qualitySlider.addEventListener("input", () => {
+    qualityValue.textContent = QUALITY_LABELS[parseInt(qualitySlider.value, 10)];
   });
   blackSlider.addEventListener("input", () => {
     blackValue.textContent = `${blackSlider.value}%`;
@@ -198,6 +208,7 @@
     const fov = parseFloat(fovSlider.value);
     const detectors = selectedDetectors();
     const mode = modeSelect.value;
+    const quality = QUALITY_LEVELS[parseInt(qualitySlider.value, 10)];
 
     if (detectors.length === 0) {
       resolveStatus.textContent = "Pick at least one detector.";
@@ -239,7 +250,7 @@
     resolveStatus.textContent = statusMsg;
     resolveStatus.className = "status-text";
 
-    writeUrlState({ position, fov, detectors, mode });
+    writeUrlState({ position, fov, detectors, mode, quality });
 
     if (state.releaseTag === "unknown") {
       state.releaseTag = await fetchReleaseTag();
@@ -250,7 +261,7 @@
       ra: resolved.ra_deg,
       dec: resolved.dec_deg,
       fov,
-      group: mode,
+      group: `${mode}:${quality}`, // quality changes the actual pixel content, so it must be part of the key
       detector: detectors.slice().sort().join(""),
     });
 
@@ -269,15 +280,15 @@
     }
 
     progressText.textContent = "Fetching from IRSA…";
-    streamFrames(position, fov, detectors, mode, cacheKey);
+    streamFrames(position, fov, detectors, mode, quality, cacheKey);
   }
 
   function reviveFrame(stored) {
     return { ...stored, data: new Uint16Array(stored.data) };
   }
 
-  async function streamFrames(position, fov, detectors, mode, cacheKey) {
-    const url = `${API_BASE}/api/frames?position=${encodeURIComponent(position)}&fov=${fov}&detectors=${detectors.join(",")}&group=${mode}`;
+  async function streamFrames(position, fov, detectors, mode, quality, cacheKey) {
+    const url = `${API_BASE}/api/frames?position=${encodeURIComponent(position)}&fov=${fov}&detectors=${detectors.join(",")}&group=${mode}&quality=${quality}`;
     let resp;
     try {
       resp = await fetch(url);
@@ -857,6 +868,9 @@
     fovWarning.hidden = urlState.fov <= 15;
     modeSelect.value = urlState.mode;
     setDetectors(urlState.detectors);
+    const qualityIdx = QUALITY_LEVELS.indexOf(urlState.quality);
+    qualitySlider.value = qualityIdx >= 0 ? qualityIdx : 1;
+    qualityValue.textContent = QUALITY_LABELS[parseInt(qualitySlider.value, 10)];
     if (urlState.position) {
       positionInput.value = urlState.position;
       runSearch();

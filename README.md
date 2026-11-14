@@ -158,6 +158,18 @@ Given the choice, speed-to-first-frame won.
 - Bonus: click-to-spectrum (forced photometry at one pixel, all 6
   detectors, correct per-exposure wavelength), linked to IRSA's own
   Spectrophotometry Tool for comparison.
+- A per-stage timing report (one log line per `/api/frames` request:
+  resolve/discover/fetch/reproject/combine/encode, plus fetch's own byte
+  count and effective parallelism) that settled where the time actually
+  goes — fetch is ~97% of it, everything else is noise — instead of
+  guessing. Led directly to the Quality slider below.
+- A **Quality slider** (Low/Mid/High) that caps exposures fetched *per
+  epoch*, evenly spaced across the epoch's time span (first/last exposure
+  always kept, so the baseline is preserved) — capped before fetching,
+  not after, since that's where the time actually goes. Measured on
+  Barnard's Star (D6, 3′ FOV): High fetched 56 images / 211.6 MB / 155.7s;
+  Low fetched 12 images / 45.4 MB / 38.7s — same 3 epochs either way, just
+  fewer (noisier) exposures stacked into each.
 
 ## What doesn't (yet)
 
