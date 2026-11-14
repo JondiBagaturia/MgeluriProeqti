@@ -38,11 +38,17 @@ def stream_frames(
     fov_arcmin: float,
     detectors: Optional[list[str]],
     mode: str,
+    resolve_seconds: float = 0.0,
 ) -> Iterator[EncodedFrame]:
     t_start = time.time()
+    stats = _TimingStats(resolve_s=resolve_seconds)
+
+    t0 = time.time()
     records = find_images(resolved.coord, fov_arcmin=fov_arcmin, detectors=detectors)
+    stats.discover_s = time.time() - t0
+    stats.n_images_found = len(records)
     if not records:
-        log.info("request done: 0 images found, 0.0s")
+        stats.log_report(t_start, n_fetched=0, n_frames_emitted=0)
         return
 
     if resolved.has_proper_motion:
@@ -68,9 +74,15 @@ def stream_frames(
     n_fetched = 0
     n_frames_emitted = 0
 
+    t_fetch_start = time.time()
     for cutout in fetch_cutouts(records, centred_coord, fov_arcmin=fov_arcmin):
         n_fetched += 1
+        stats.record_fetch(cutout)
+
+        t0 = time.time()
         p = process_cutout(cutout, centred_coord, target_wcs, shape_out)
+        stats.reproject_s += time.time() - t0
+
         ridx = index_of_record[id(cutout.record)]
         gi = record_to_group[id(cutout.record)]
         pending[gi][ridx] = p
@@ -79,7 +91,8 @@ def stream_frames(
             emitted.add(gi)
             members = [pending[gi][i] for i in sorted(pending[gi].keys())]
             n_frames_emitted += 1
-            yield _combine_and_encode(gi, len(groups), members)
+            yield _combine_and_encode(gi, len(groups), members, stats)
+    stats.fetch_wall_s = time.time() - t_fetch_start
 
     # Groups that never fully completed (some fetch(es) failed after
     # retries) are still emitted, best-effort, once the stream ends — the
@@ -89,24 +102,84 @@ def stream_frames(
         if gi not in emitted and pending[gi]:
             members = [pending[gi][i] for i in sorted(pending[gi].keys())]
             n_frames_emitted += 1
-            yield _combine_and_encode(gi, len(groups), members, partial=True)
+            yield _combine_and_encode(gi, len(groups), members, stats, partial=True)
 
-    log.info(
-        "request done: %d image(s) found, %d fetched, %d dropped, %d frame(s) emitted, %.1fs total",
-        len(records),
-        n_fetched,
-        len(records) - n_fetched,
-        n_frames_emitted,
-        time.time() - t_start,
-    )
+    stats.log_report(t_start, n_fetched, n_frames_emitted)
+
+
+class _TimingStats:
+    """Accumulates where the time went for one /api/frames request, so a
+    slow run can be diagnosed from the numbers instead of guessed at.
+    fetch_cutouts runs cutouts across a thread pool, so `fetch_wall_s`
+    (elapsed clock time) and the sum of individual fetch times can differ
+    a lot - that gap *is* the parallelism actually achieved."""
+
+    def __init__(self, resolve_s: float = 0.0):
+        self.resolve_s = resolve_s
+        self.discover_s = 0.0
+        self.n_images_found = 0
+        self.fetch_wall_s = 0.0
+        self.fetch_bytes_total = 0
+        self.fetch_seconds_sum = 0.0  # sum of individual successful fetches
+        self.slowest_fetch_s = 0.0
+        self.slowest_fetch_id = ""
+        self.reproject_s = 0.0
+        self.combine_s = 0.0
+        self.encode_s = 0.0
+
+    def record_fetch(self, cutout) -> None:
+        self.fetch_bytes_total += cutout.downloaded_bytes
+        self.fetch_seconds_sum += cutout.fetch_seconds
+        if cutout.fetch_seconds > self.slowest_fetch_s:
+            self.slowest_fetch_s = cutout.fetch_seconds
+            self.slowest_fetch_id = cutout.record.obs_id
+
+    def log_report(self, t_start: float, n_fetched: int, n_frames_emitted: int) -> None:
+        total_s = time.time() - t_start
+        mb = self.fetch_bytes_total / (1024 * 1024)
+        effective_parallelism = self.fetch_seconds_sum / self.fetch_wall_s if self.fetch_wall_s > 0 else 0.0
+        log.info(
+            "request timing report:\n"
+            "  resolve (SIMBAD/Sesame): %.2fs\n"
+            "  discover (SIA query):    %.2fs -> %d image(s) found\n"
+            "  fetch cutouts:            %.1fs wall-clock, %d ok, %.1f MB total, "
+            "sum-of-individual=%.1fs (~%.1fx effective parallelism), slowest=%s %.1fs\n"
+            "  reproject (align):        %.2fs total (%.3fs/image avg)\n"
+            "  combine (stack):          %.2fs total\n"
+            "  encode (quantize+b64):    %.2fs total\n"
+            "  TOTAL:                    %.1fs, %d frame(s) emitted",
+            self.resolve_s,
+            self.discover_s,
+            self.n_images_found,
+            self.fetch_wall_s,
+            n_fetched,
+            mb,
+            self.fetch_seconds_sum,
+            effective_parallelism,
+            self.slowest_fetch_id or "-",
+            self.slowest_fetch_s,
+            self.reproject_s,
+            (self.reproject_s / n_fetched) if n_fetched else 0.0,
+            self.combine_s,
+            self.encode_s,
+            total_s,
+            n_frames_emitted,
+        )
 
 
 def _combine_and_encode(
-    group_index: int, n_groups: int, members: list[ProcessedCutout], partial: bool = False
+    group_index: int,
+    n_groups: int,
+    members: list[ProcessedCutout],
+    stats: "_TimingStats",
+    partial: bool = False,
 ) -> EncodedFrame:
+    t0 = time.time()
     image, variance, n_contrib = combine_inverse_variance(
         [m.image for m in members], [m.variance for m in members]
     )
+    stats.combine_s += time.time() - t0
+
     contamination: dict[str, int] = {}
     for m in members:
         for name, count in m.contamination.items():
@@ -130,4 +203,8 @@ def _combine_and_encode(
         bandwidth_um=float(np.mean(bws)) if bws else None,
         release_versions=sorted({m.record.collection for m in members}),
     )
-    return encode_frame(frame, extra_metadata={"n_groups": n_groups, "partial": partial})
+
+    t0 = time.time()
+    encoded = encode_frame(frame, extra_metadata={"n_groups": n_groups, "partial": partial})
+    stats.encode_s += time.time() - t0
+    return encoded

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -137,13 +138,15 @@ async def frames(
     """NDJSON stream: one processed, combined frame per line, as soon as
     each is ready. Each line carries width/height/scale/offset + a base64
     uint16 payload + metadata — the browser does all stretching client-side."""
+    t0 = time.time()
     resolved = await run_in_threadpool(_resolve_or_400, position)
+    resolve_seconds = time.time() - t0
     fov_arcmin = _validate_fov(fov)
     det_list = _parse_detectors(detectors)
 
     def generate():
         try:
-            for encoded in stream_frames(resolved, fov_arcmin, det_list, group):
+            for encoded in stream_frames(resolved, fov_arcmin, det_list, group, resolve_seconds):
                 line = {
                     "width": encoded.width,
                     "height": encoded.height,

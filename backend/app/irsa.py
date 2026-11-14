@@ -118,6 +118,8 @@ def find_images(coord: SkyCoord, fov_arcmin: float, detectors: Optional[list[str
 class Cutout:
     record: ImageRecord
     hdul: fits.HDUList  # only KEPT_EXTENSIONS present
+    downloaded_bytes: int = 0  # full response size, incl. the EPSF table we then strip
+    fetch_seconds: float = 0.0  # this cutout's successful attempt only, not retries/backoff
 
 
 def _cutout_url(record: ImageRecord, coord: SkyCoord, fov_arcmin: float) -> str:
@@ -141,11 +143,13 @@ def _fetch_one(record: ImageRecord, coord: SkyCoord, fov_arcmin: float, session:
 
     for attempt in range(cfg.max_retries + 1):
         try:
+            t0 = time.time()
             with _global_fetch_semaphore:
                 resp = session.get(url, timeout=(cfg.connect_timeout_s, cfg.read_timeout_s))
             if resp.status_code in cfg.retry_status_codes:
                 raise _RetryableHTTPStatus(f"{resp.status_code} {resp.text[:100]}")
             resp.raise_for_status()  # non-retryable 4xx/5xx -> plain HTTPError, not retried below
+            n_bytes = len(resp.content)
             full = fits.open(io.BytesIO(resp.content))
             # Keep only the extensions we use; drop EPSF (and anything else
             # unexpected) before this ever leaves memory for the pipeline.
@@ -153,7 +157,7 @@ def _fetch_one(record: ImageRecord, coord: SkyCoord, fov_arcmin: float, session:
                 [full[0]] + [full[ext].copy() for ext in KEPT_EXTENSIONS if ext in full]
             )
             full.close()
-            return Cutout(record=record, hdul=trimmed)
+            return Cutout(record=record, hdul=trimmed, downloaded_bytes=n_bytes, fetch_seconds=time.time() - t0)
         except (
             requests.Timeout,
             requests.ConnectionError,
