@@ -518,7 +518,7 @@
       const vb = physicalValuesForFrame(b);
       const diff = new Float32Array(va.length);
       for (let i = 0; i < diff.length; i++) diff[i] = vb[i] - va[i]; // NaN propagates if either side is NaN
-      renderGrid(a.width, a.height, diff);
+      renderGrid(a.width, a.height, diff, { useGlobalAsinhLevels: false });
       frameLabel.textContent =
         `Difference: epoch @ ${fmtDate(b.timeMjdMean)}  −  epoch @ ${fmtDate(a.timeMjdMean)}\n` +
         `A moving/variable source shows as a dark/bright dipole pair.`;
@@ -537,24 +537,31 @@
       }
       const mean = new Float32Array(sum.length);
       for (let i = 0; i < sum.length; i++) mean[i] = count[i] > 0 ? sum[i] / count[i] : NaN;
-      renderGrid(first.width, first.height, mean);
+      renderGrid(first.width, first.height, mean, { useGlobalAsinhLevels: false });
       frameLabel.textContent = `Sum of all ${state.frames.length} epoch(s) — a persistent faint source stands out; a mover smears out.`;
     } else {
       const frame = state.frames[state.currentIndex];
-      renderGrid(frame.width, frame.height, physicalValuesForFrame(frame));
+      renderGrid(frame.width, frame.height, physicalValuesForFrame(frame), { useGlobalAsinhLevels: true });
       updateFrameLabel(frame);
     }
     updateContaminationSummary();
   }
-  function renderGrid(width, height, values) {
+  function renderGrid(width, height, values, { useGlobalAsinhLevels = true } = {}) {
     state.lastRenderedGrid = { width, height, values };
     const mode = stretchSelect.value;
 
     // Asinh's levels come from every loaded frame combined (see
-    // recomputeGlobalFiniteValues), not just this one grid - falls back
-    // to this grid's own values if that cache is somehow empty.
+    // recomputeGlobalFiniteValues) ONLY for the plain blink view - those
+    // are raw per-epoch flux values (roughly 0..300 MJy/sr). Difference
+    // and Sum pass useGlobalAsinhLevels:false because their arrays are a
+    // different quantity entirely (differences centred near 0, including
+    // negatives; sums on a different scale) - using the blink levels on
+    // those made the display look badly broken (everything clipped to
+    // one extreme, since the white point was calibrated for raw flux, not
+    // for small +/- differences). Falls back to this grid's own values if
+    // the global cache is somehow empty.
     let physValues;
-    if (mode === "asinh" && state.globalFiniteValues && state.globalFiniteValues.length) {
+    if (mode === "asinh" && useGlobalAsinhLevels && state.globalFiniteValues && state.globalFiniteValues.length) {
       physValues = state.globalFiniteValues;
     } else {
       physValues = [];

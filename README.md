@@ -176,6 +176,14 @@ Given the choice, speed-to-first-frame won.
   levels fixed at the median/99.8th percentile across every loaded frame
   (not recomputed per frame, so contrast stays consistent through the
   blink), plus its red/salmon gapped crosshair.
+- Fixed: Difference and Sum view modes under Asinh were badly broken -
+  they were using those same blink-frame levels (raw flux, roughly
+  0-300 MJy/sr) to stretch a completely different quantity (a difference
+  array, centred near 0 and including negatives; a sum, a different
+  scale again), so the display clipped to one extreme almost everywhere.
+  Those two modes now compute their own levels from their own array, the
+  same way Linear/Zscale always did - only the plain blink view uses the
+  shared global levels.
 - Output grid pixel scale matched to theirs too: SPHEREx's real native
   pixel scale is 6.15″/px (confirmed from IRSA's own SIA metadata), but
   their script's output grid is 3.075″/px - exactly half, i.e. roughly 4×
