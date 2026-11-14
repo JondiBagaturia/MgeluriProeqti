@@ -25,6 +25,7 @@ from .pipeline import (
     group_indices,
     cap_group_indices,
     combine_inverse_variance,
+    fill_small_gaps,
     Frame,
     ProcessedCutout,
 )
@@ -194,6 +195,11 @@ def _combine_and_encode(
     image, variance, n_contrib = combine_inverse_variance(
         [m.image for m in members], [m.variance for m in members]
     )
+    # Fill small, isolated NaN holes (see fill_small_gaps's docstring - this
+    # is specifically for the "target's own peak pixel is masked in every
+    # exposure" bug). Only after combining across every available exposure,
+    # and only small gaps - a real masked region is left untouched.
+    image, n_gap_filled = fill_small_gaps(image)
     stats.combine_s += time.time() - t0
 
     contamination: dict[str, int] = {}
@@ -221,6 +227,8 @@ def _combine_and_encode(
     )
 
     t0 = time.time()
-    encoded = encode_frame(frame, extra_metadata={"n_groups": n_groups, "partial": partial})
+    encoded = encode_frame(
+        frame, extra_metadata={"n_groups": n_groups, "partial": partial, "n_gap_filled_pixels": n_gap_filled}
+    )
     stats.encode_s += time.time() - t0
     return encoded

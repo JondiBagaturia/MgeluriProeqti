@@ -18,6 +18,7 @@ from astropy.wcs import WCS, FITSFixedWarning
 from astropy.coordinates import SkyCoord
 import astropy.units as u
 from reproject import reproject_interp
+from scipy import ndimage
 
 from .irsa import Cutout, ImageRecord
 
@@ -31,9 +32,22 @@ from .irsa import Cutout, ImageRecord
 warnings.filterwarnings("ignore", category=FITSFixedWarning, message=".*SIP.*")
 logging.getLogger("astropy").setLevel(logging.ERROR)
 
-# SIMBAD calls this flag "benign" / informational, not a defect — never mask
-# these by default even though they're real bits in the FLAGS header.
-ALWAYS_SAFE_FLAG_NAMES = {"SOURCE", "FULLSAMPLE"}
+# These are informational, not defects — never mask by default even
+# though they're real bits in the FLAGS header.
+#
+# TRANSIENT and HALO were added after a real bug report: Barnard's Star
+# (not even an especially bright target) showed a "no data" hole right at
+# its own brightest pixels. Traced it directly - its core (flux ~1000x the
+# surrounding sky in one exposure) is flagged TRANSIENT + HALO, because a
+# bright source's fast-changing signal during up-the-ramp sampling looks
+# like a transient event to that automated flag - not because the pixel is
+# actually bad. Masking it was throwing away exactly the data users most
+# want to see. OVERFLOW/SUR_ERROR stay masked - those describe genuine
+# saturation/onboard-processing defects (confirmed separately on R Draconis,
+# which saturates for real: OVERFLOW+BLOOM, no TRANSIENT/HALO involved).
+# This is a judgement call about flag semantics, not something IRSA's docs
+# spell out explicitly - flagged here if it needs revisiting.
+ALWAYS_SAFE_FLAG_NAMES = {"SOURCE", "FULLSAMPLE", "TRANSIENT", "HALO"}
 
 
 # ---------------------------------------------------------------------------
@@ -259,6 +273,52 @@ def combine_inverse_variance(
         combined = np.where(weight_sum > 0, weighted_sum / weight_sum, np.nan)
         combined_var = np.where(weight_sum > 0, 1.0 / weight_sum, np.nan)
     return combined.astype(np.float32), combined_var.astype(np.float32), n_contrib.astype(np.int16)
+
+
+def fill_small_gaps(image: np.ndarray, max_hole_pixels: int = 6) -> tuple[np.ndarray, int]:
+    """Fill small, isolated NaN regions with the mean of their immediate
+    valid neighbours - for display, after every exposure has already been
+    combined.
+
+    Real bug this exists for: a live check (all 6 detectors, Barnard's
+    Star - not an especially bright target) found SPHEREx's own automated
+    flagging masks the exact peak pixel of a point source in 100% of
+    exposures, every detector, every epoch - sometimes OVERFLOW/BLOOM
+    (genuine saturation), but just as often TRANSIENT/HALO/GHOST/etc on an
+    exposure that isn't saturated at all. The result: the combined stack
+    shows a literal black hole at the exact centre of every single target
+    you search for, surrounded by otherwise-valid flux. Masking individual
+    flags more leniently doesn't fully fix it (see ALWAYS_SAFE_FLAG_NAMES's
+    comment) because *some* real flag trips on nearly every exposure.
+
+    Filling only small holes (<= max_hole_pixels, after combining across
+    every available exposure) is the conservative middle ground: a large
+    masked region (a real bad column, a saturated extended source, a
+    satellite streak) is left alone - only a small, bounded gap like this
+    one gets a locally-interpolated value. Returns (filled_image,
+    n_pixels_filled) so callers can report this honestly rather than
+    silently manufacturing data.
+    """
+    nan_mask = ~np.isfinite(image)
+    if not nan_mask.any():
+        return image, 0
+
+    labeled, n_features = ndimage.label(nan_mask)
+    out = image.copy()
+    n_filled = 0
+    for label_id in range(1, n_features + 1):
+        hole = labeled == label_id
+        size = int(hole.sum())
+        if size > max_hole_pixels:
+            continue  # a real gap, not a one-off flag collision - leave it as NaN
+        ring = ndimage.binary_dilation(hole, iterations=1) & ~hole
+        neighbour_vals = image[ring]
+        neighbour_vals = neighbour_vals[np.isfinite(neighbour_vals)]
+        if neighbour_vals.size == 0:
+            continue  # no valid neighbours either - can't interpolate, leave as NaN
+        out[hole] = float(np.mean(neighbour_vals))
+        n_filled += size
+    return out, n_filled
 
 
 @dataclass

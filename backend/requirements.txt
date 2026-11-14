@@ -3,6 +3,7 @@ astropy>=8.0,<9
 astroquery>=0.4.11,<0.5
 reproject>=0.21,<0.22
 numpy>=2.4,<3
+scipy>=1.17,<2  # was only an implicit transitive dep of reproject; now used directly (fill_small_gaps)
 pyvo>=1.6
 fastapi>=0.162,<0.163
 uvicorn[standard]>=0.54,<0.55

@@ -340,6 +340,7 @@
           contamination: obj.contamination,
           releaseVersions: obj.release_versions,
           partial: obj.partial,
+          nGapFilledPixels: obj.n_gap_filled_pixels,
           width: obj.width,
           height: obj.height,
           scale: obj.scale,
@@ -584,10 +585,13 @@
         ? fmtDate(frame.timeMjdMin)
         : `${fmtDate(frame.timeMjdMin)}…${fmtDate(frame.timeMjdMax)}`;
     const partial = frame.partial ? "  [partial: some exposures failed to fetch]" : "";
+    const gapFilled = frame.nGapFilledPixels
+      ? `  [${frame.nGapFilledPixels}px interpolated - SPHEREx flags the peak of bright sources in every exposure]`
+      : "";
     frameLabel.textContent =
       `Frame ${state.currentIndex + 1}/${state.frames.length}   ${dateRange}\n` +
       `Detectors: ${frame.detectors.join(",")}   λ ${waveStr}\n` +
-      `${frame.nExposures} exposure(s) combined${partial}`;
+      `${frame.nExposures} exposure(s) combined${partial}${gapFilled}`;
   }
 
   // ---------------------------------------------------------------------

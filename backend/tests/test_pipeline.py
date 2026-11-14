@@ -45,3 +45,43 @@ def test_cap_never_exceeds_requested_and_never_exceeds_input(n, cap):
     assert len(capped) <= min(n, cap)
     assert len(capped) >= 1
     assert set(capped) <= set(idxs)
+
+
+from app.pipeline import fill_small_gaps
+import numpy as np
+
+
+def test_fill_small_gaps_fills_isolated_hole():
+    img = np.ones((10, 10), dtype=np.float32) * 5.0
+    img[4, 4] = np.nan  # a single isolated bad pixel, like the target's own peak
+    filled, n_filled = fill_small_gaps(img, max_hole_pixels=6)
+    assert n_filled == 1
+    assert filled[4, 4] == pytest.approx(5.0)
+    assert np.isfinite(filled).all()
+
+
+def test_fill_small_gaps_leaves_large_holes_alone():
+    img = np.ones((10, 10), dtype=np.float32) * 5.0
+    img[2:8, 2:8] = np.nan  # a real 36-pixel masked region
+    filled, n_filled = fill_small_gaps(img, max_hole_pixels=6)
+    assert n_filled == 0
+    assert np.isnan(filled[4, 4])
+
+
+def test_fill_small_gaps_no_op_when_no_nans():
+    img = np.arange(16, dtype=np.float32).reshape(4, 4)
+    filled, n_filled = fill_small_gaps(img)
+    assert n_filled == 0
+    np.testing.assert_array_equal(filled, img)
+
+
+def test_fill_small_gaps_averages_multiple_neighbours():
+    img = np.full((5, 5), np.nan, dtype=np.float32)
+    img[1, 2] = 10.0
+    img[2, 1] = 20.0
+    img[2, 3] = 30.0
+    img[3, 2] = 40.0
+    # centre (2,2) is a 1-pixel hole surrounded by the four values above
+    filled, n_filled = fill_small_gaps(img, max_hole_pixels=6)
+    assert n_filled == 1
+    assert filled[2, 2] == pytest.approx(25.0)  # mean of 10,20,30,40
