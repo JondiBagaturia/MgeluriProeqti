@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SPHEREx Blink</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <h1>SPHEREx Blink</h1>
+  <p class="tagline">Blink NASA SPHEREx epochs at any sky position to spot moving or variable objects — inspired by <a href="http://byw.tools/wiseview" target="_blank" rel="noopener">WiseView</a>.</p>
+</header>
+
+<form id="search-form" class="search-bar">
+  <input id="position-input" type="text" placeholder="RA/Dec (08h55m10.8s -07d14m42.5s or 269.452 4.693) or an object name" autocomplete="off">
+  <button type="submit" id="go-btn">Go</button>
+  <span id="resolve-status" class="status-text"></span>
+</form>
+
+<div class="layout">
+  <aside class="controls" id="controls">
+    <section>
+      <h2>Search</h2>
+      <label>Field of view: <span id="fov-value">5′</span>
+        <input id="fov-slider" type="range" min="1" max="30" step="0.5" value="5">
+      </label>
+      <p id="fov-warning" class="warning" hidden>Large FOV — this will be slower.</p>
+
+      <label>Grouping
+        <select id="mode-select">
+          <option value="epoch" selected>Per survey epoch (best S/N, default)</option>
+          <option value="detector_epoch">Per detector per epoch</option>
+          <option value="single">Every exposure</option>
+        </select>
+      </label>
+
+      <fieldset id="detector-fieldset">
+        <legend>Detectors</legend>
+        <label><input type="checkbox" value="D1"> D1 (0.75–1.09 µm)</label>
+        <label><input type="checkbox" value="D2" checked> D2 (1.10–1.62 µm)</label>
+        <label><input type="checkbox" value="D3"> D3 (1.63–2.41 µm)</label>
+        <label><input type="checkbox" value="D4"> D4 (2.42–3.82 µm)</label>
+        <label><input type="checkbox" value="D5"> D5 (3.83–4.41 µm)</label>
+        <label><input type="checkbox" value="D6" checked> D6 (4.42–5.00 µm)</label>
+      </fieldset>
+    </section>
+
+    <section>
+      <h2>Discovery</h2>
+      <label>View
+        <select id="view-mode-select">
+          <option value="blink" selected>Blink</option>
+          <option value="difference">Difference (B − A)</option>
+          <option value="sum">Sum all epochs</option>
+        </select>
+      </label>
+      <div id="ab-pick" hidden>
+        <label>Frame A <input id="diff-a-slider" type="range" min="0" max="0" value="0"></label>
+        <label>Frame B <input id="diff-b-slider" type="range" min="0" max="0" value="0"></label>
+      </div>
+      <p id="contamination-summary" class="status-text"></p>
+    </section>
+
+    <section>
+      <h2>Display</h2>
+      <label>Stretch
+        <select id="stretch-select">
+          <option value="linear">Linear</option>
+          <option value="asinh" selected>Asinh</option>
+          <option value="zscale">Zscale-like</option>
+        </select>
+      </label>
+      <label>Black point <span id="black-value"></span>
+        <input id="black-slider" type="range" min="0" max="100" value="1" step="0.5">
+      </label>
+      <label>White point <span id="white-value"></span>
+        <input id="white-slider" type="range" min="0" max="100" value="99" step="0.5">
+      </label>
+      <label><input id="invert-checkbox" type="checkbox"> Invert</label>
+      <label>Zoom <span id="zoom-value">8×</span>
+        <input id="zoom-slider" type="range" min="1" max="32" value="8" step="1">
+      </label>
+    </section>
+
+    <section>
+      <h2>Cache</h2>
+      <p id="cache-status" class="status-text">—</p>
+      <button type="button" id="clear-cache-btn">Clear cache</button>
+    </section>
+
+    <section>
+      <h2>Share</h2>
+      <label>Link <input id="share-url" type="text" readonly></label>
+      <label>Embed <textarea id="embed-snippet" readonly rows="2"></textarea></label>
+    </section>
+  </aside>
+
+  <main class="viewer-area">
+    <div id="progress-wrap" hidden>
+      <div id="progress-bar"></div>
+      <span id="progress-text"></span>
+    </div>
+
+    <div id="canvas-wrap">
+      <canvas id="viewer-canvas" width="400" height="400"></canvas>
+      <div id="frame-label" class="frame-label"></div>
+      <div id="pixel-readout" class="pixel-readout"></div>
+      <div id="empty-state" class="empty-state">
+        Enter a position above (try "Barnard's star", "WISE J085510.83-071442.5", or "269.452 4.693") and press Go.
+      </div>
+    </div>
+
+    <div class="playback-bar">
+      <button type="button" id="step-back-btn" title="Previous frame (←)">⏮</button>
+      <button type="button" id="play-btn" title="Play/Pause (space)">▶</button>
+      <button type="button" id="step-fwd-btn" title="Next frame (→)">⏭</button>
+      <label>Speed <input id="speed-slider" type="range" min="1" max="10" value="4"></label>
+      <label><input id="loop-checkbox" type="checkbox" checked> Loop</label>
+      <label><input id="ab-checkbox" type="checkbox"> A/B flip</label>
+      <input id="frame-slider" type="range" min="0" max="0" value="0">
+    </div>
+
+    <div class="lightcurve-wrap">
+      <h2>Light curve <span class="status-text">(flux at the target pixel, per frame — not aperture photometry; see README)</span></h2>
+      <canvas id="lightcurve-canvas" width="900" height="140"></canvas>
+    </div>
+  </main>
+</div>
+
+<footer class="credits">
+  <p>Data: NASA/IPAC Infrared Science Archive (IRSA), SPHEREx mission. Name resolution: SIMBAD, CDS Strasbourg.
+  This tool fetches public SPHEREx cutouts live from IRSA and stores nothing server-side; your browser caches
+  recently viewed frames locally (see "Cache" panel) purely to make repeat views faster.</p>
+</footer>
+
+<script src="idb_cache.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

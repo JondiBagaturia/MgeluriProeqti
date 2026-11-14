@@ -1,0 +1,8 @@
+services:
+  spherex-blink:
+    build: .
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    # No volumes: the backend is stateless by design (PLAN.md) — nothing
+    # written to disk needs to survive a restart.
