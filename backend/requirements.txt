@@ -1,0 +1,10 @@
+# Pin Python 3.11 — astropy/astroquery/reproject/numpy have no wheels for 3.14 yet (Nov 2026).
+astropy>=8.0,<9
+astroquery>=0.4.11,<0.5
+reproject>=0.21,<0.22
+numpy>=2.4,<3
+pyvo>=1.6
+fastapi>=0.162,<0.163
+uvicorn[standard]>=0.54,<0.55
+requests>=2.32
+pillow>=11
