@@ -170,6 +170,14 @@ Given the choice, speed-to-first-frame won.
   Barnard's Star (D6, 3′ FOV): High fetched 56 images / 211.6 MB / 155.7s;
   Low fetched 12 images / 45.4 MB / 38.7s — same 3 epochs either way, just
   fewer (noisier) exposures stacked into each.
+- The Asinh display mode is a ported renderer from a teammate's parallel
+  prototype ([DmaniseliMgeli/planet-x](https://github.com/DmaniseliMgeli/planet-x),
+  `phase1-check/phase1/blink.py`): astropy's `AsinhStretch(a=0.05)` with
+  levels fixed at the median/99.8th percentile across every loaded frame
+  (not recomputed per frame, so contrast stays consistent through the
+  blink), plus its red/salmon gapped crosshair. Their script independently
+  found and fixed the same bright-source-core masking bug documented
+  below, which is a good independent sanity check on both of our pipelines.
 
 ## What doesn't (yet)
 

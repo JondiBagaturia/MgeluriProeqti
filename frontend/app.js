@@ -29,6 +29,7 @@
   const QUALITY_LEVELS = ["low", "mid", "high"];
   const QUALITY_LABELS = ["Low (fastest)", "Mid (balanced)", "High (full quality)"];
   const stretchSelect = $("stretch-select");
+  const asinhNote = $("asinh-note");
   const blackSlider = $("black-slider");
   const whiteSlider = $("white-slider");
   const blackValue = $("black-value");
@@ -83,6 +84,7 @@
     abFrames: [0, 0],
     abPhase: 0,
     lastRenderedGrid: null, // {width, height, values: Float32Array (NaN = no data)}
+    globalFiniteValues: null, // flat array across ALL loaded frames, for Asinh's fixed levels
   };
 
   // ---------------------------------------------------------------------
@@ -164,7 +166,17 @@
     whiteValue.textContent = `${whiteSlider.value}%`;
     renderView();
   });
-  stretchSelect.addEventListener("change", renderView);
+  function updateStretchControlsEnabled() {
+    const isAsinh = stretchSelect.value === "asinh";
+    blackSlider.disabled = isAsinh;
+    whiteSlider.disabled = isAsinh;
+    asinhNote.hidden = !isAsinh;
+  }
+  stretchSelect.addEventListener("change", () => {
+    updateStretchControlsEnabled();
+    renderView();
+  });
+  updateStretchControlsEnabled();
   invertCheckbox.addEventListener("change", renderView);
   zoomSlider.addEventListener("input", () => {
     zoomValue.textContent = `${zoomSlider.value}×`;
@@ -416,12 +428,25 @@
     diffBSlider.max = maxIdx;
     if (diffBSlider.value == 0 && maxIdx > 0) diffBSlider.value = maxIdx; // default B to the latest epoch
     if (state.frames.length) emptyState.hidden = true;
+    recomputeGlobalFiniteValues();
     drawLightCurve();
   }
 
   // ---------------------------------------------------------------------
   // Stretch / rendering
   // ---------------------------------------------------------------------
+  // Asinh is a faithful port of a teammate's renderer
+  // (github.com/DmaniseliMgeli/planet-x, phase1-check/phase1/blink.py):
+  // astropy's AsinhStretch(a=0.05) - y = asinh(x/a)/asinh(1/a), same form
+  // as our existing formula with A = 1/a = 20 - with vmin/vmax fixed at
+  // the median and 99.8th percentile, computed once across every loaded
+  // frame (not per-frame), so contrast stays consistent through the
+  // blink instead of jumping epoch to epoch. That global computation
+  // lives in recomputeGlobalFiniteValues() below; the black/white
+  // sliders are inactive for this mode (their script has no adjustable
+  // levels), active as before for Linear/Zscale.
+  const ASINH_A = 1 / 0.05; // = 20
+
   function computeLevels(finiteValues, mode, blackPct, whitePct) {
     if (finiteValues.length === 0) return { black: 0, white: 1 };
     const sorted = Array.from(finiteValues).sort((a, b) => a - b);
@@ -434,6 +459,9 @@
       const sigma = mad * 1.4826;
       return { black: median - 1 * sigma, white: median + 5 * sigma };
     }
+    if (mode === "asinh") {
+      return { black: pct(50), white: pct(99.8) };
+    }
     return { black: pct(blackPct), white: pct(whitePct) };
   }
 
@@ -441,15 +469,30 @@
     let t;
     const range = white - black || 1e-9;
     if (mode === "asinh") {
-      const A = 10;
       const lin = (phys - black) / range;
-      t = Math.asinh(lin * A) / Math.asinh(A);
+      t = Math.asinh(lin * ASINH_A) / Math.asinh(ASINH_A);
     } else {
       t = (phys - black) / range;
     }
     t = Math.min(1, Math.max(0, t));
     if (invert) t = 1 - t;
     return Math.round(t * 255);
+  }
+
+  /** Levels for Asinh mode come from every currently-loaded frame
+   * combined, not just the one on screen - recomputed whenever the frame
+   * set changes (see updateFrameSlider). */
+  function recomputeGlobalFiniteValues() {
+    if (state.frames.length === 0) {
+      state.globalFiniteValues = null;
+      return;
+    }
+    const all = [];
+    for (const f of state.frames) {
+      const v = physicalValuesForFrame(f);
+      for (let i = 0; i < v.length; i++) if (Number.isFinite(v[i])) all.push(v[i]);
+    }
+    state.globalFiniteValues = all;
   }
 
   /** Raw uint16+scale/offset -> physical values, NaN where there's no data. */
@@ -505,10 +548,19 @@
   }
   function renderGrid(width, height, values) {
     state.lastRenderedGrid = { width, height, values };
-    const physValues = [];
-    for (let i = 0; i < values.length; i++) if (Number.isFinite(values[i])) physValues.push(values[i]);
-
     const mode = stretchSelect.value;
+
+    // Asinh's levels come from every loaded frame combined (see
+    // recomputeGlobalFiniteValues), not just this one grid - falls back
+    // to this grid's own values if that cache is somehow empty.
+    let physValues;
+    if (mode === "asinh" && state.globalFiniteValues && state.globalFiniteValues.length) {
+      physValues = state.globalFiniteValues;
+    } else {
+      physValues = [];
+      for (let i = 0; i < values.length; i++) if (Number.isFinite(values[i])) physValues.push(values[i]);
+    }
+
     const blackPct = parseFloat(blackSlider.value);
     const whitePct = parseFloat(whiteSlider.value);
     const { black, white } = computeLevels(physValues, mode, blackPct, whitePct);
@@ -539,9 +591,13 @@
     canvasCtx.clearRect(0, 0, canvas.width, canvas.height);
     canvasCtx.drawImage(offscreen, 0, 0, width, height, 0, 0, width * zoom, height * zoom);
 
-    // crosshair on the target (always the grid centre, by construction)
-    canvasCtx.strokeStyle = "rgba(95,176,255,0.85)";
-    canvasCtx.lineWidth = 1;
+    // crosshair on the target (always the grid centre, by construction) -
+    // colour/gapped style matches the planet-x renderer's blink.py
+    // (fill=(255,80,80)); gap/arm length kept proportional to our zoom
+    // instead of their fixed native-pixel offsets, since our grids are
+    // much smaller (~30px vs their ~195px) and our zoom is adjustable.
+    canvasCtx.strokeStyle = "rgba(255,80,80,0.9)";
+    canvasCtx.lineWidth = 2;
     const cx = canvas.width / 2;
     const cy = canvas.height / 2;
     canvasCtx.beginPath();
