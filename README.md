@@ -176,6 +176,15 @@ Given the choice, speed-to-first-frame won.
   levels fixed at the median/99.8th percentile across every loaded frame
   (not recomputed per frame, so contrast stays consistent through the
   blink), plus its red/salmon gapped crosshair.
+- Output grid pixel scale matched to theirs too: SPHEREx's real native
+  pixel scale is 6.15″/px (confirmed from IRSA's own SIA metadata), but
+  their script's output grid is 3.075″/px - exactly half, i.e. roughly 4×
+  the pixel count for the same field of view. This doesn't add real
+  resolution (nearest-neighbour reprojection just repeats each native
+  pixel's value across the ~4 output pixels it now covers), but it looks
+  noticeably less blocky when zoomed, so we matched it. Negligible
+  performance cost - reproject time per image was unchanged (confirmed
+  via the timing report) despite the 4× larger grid.
 - The default flag mask now matches their `stack.py` exactly: only
   `NONFUNC`/`MISSING_DATA`/`HOT`/`COLD` are treated as bad (read by name,
   not their hard-coded bit numbers, per PLAN.md's finding that bit

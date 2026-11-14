@@ -68,4 +68,15 @@ fetch:
   backoff_base_s: 2
   retry_status_codes: [503, 502, 504]
 
-pixel_scale_arcsec: 6.15
+# The real native SPHEREx pixel scale is 6.15"/px (confirmed directly from
+# IRSA's own SIA metadata, s_pixel_scale). A teammate's independent
+# "planet-x" renderer (phase1/common.py) outputs onto a grid at exactly
+# half that (3.075"/px) - this doesn't add real resolution (the native
+# data is still 6.15"/px either way), it's oversampling onto a finer
+# display grid for a smoother, less blocky zoomed look. Matched here so
+# our output looks comparably fine-grained; app/pipeline.py's
+# reproject_nearest (nearest-neighbour) just repeats each native pixel's
+# value across the ~4 output pixels it now covers, honouring NaN masks
+# exactly either way - no blending, no new information, just smaller
+# on-screen squares.
+pixel_scale_arcsec: 3.075
