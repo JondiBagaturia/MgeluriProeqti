@@ -8,6 +8,7 @@ silently mask (or fail to mask) the wrong bits on some files.
 """
 from __future__ import annotations
 
+import logging
 import warnings
 from dataclasses import dataclass, field
 from typing import Optional
@@ -24,7 +25,11 @@ from .irsa import Cutout, ImageRecord
 # TAN-SIP in the IMAGE header", but CTYPE itself just says RA---TAN /
 # DEC--TAN). astropy correctly applies the SIP coefficients anyway; the
 # warning is expected on every single file, not a sign something's wrong.
+# astropy routes this through both the `warnings` module *and* its own
+# "astropy" logger (the latter is what actually prints it under uvicorn/
+# plain scripts), so both have to be silenced to stop the per-file spam.
 warnings.filterwarnings("ignore", category=FITSFixedWarning, message=".*SIP.*")
+logging.getLogger("astropy").setLevel(logging.ERROR)
 
 # SIMBAD calls this flag "benign" / informational, not a defect — never mask
 # these by default even though they're real bits in the FLAGS header.

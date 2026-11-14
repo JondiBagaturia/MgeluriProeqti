@@ -5,5 +5,7 @@ node_modules/
 .DS_Store
 *.fits
 /tmp_phase0/
-examples/*.gif
 .env
+# examples/*.gif and examples/*.png are intentionally tracked - they're
+# the smoke test's showcase output (scripts/smoke_test.py), small (a few
+# tens of KB each at this cutout size), and the README links to them.

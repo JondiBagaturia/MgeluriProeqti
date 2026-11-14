@@ -1,0 +1,183 @@
+[
+  {
+    "label": "Barnards_Star",
+    "query": "Barnard's star",
+    "fov_arcmin": 3.0,
+    "detectors": [
+      "D6"
+    ],
+    "resolved_ra_deg": 269.4520769586187,
+    "resolved_dec_deg": 4.693364966576667,
+    "resolution_source": "simbad",
+    "has_proper_motion": true,
+    "pmra_mas_yr": -801.551,
+    "pmdec_mas_yr": 10362.394,
+    "discover_s": 6.4,
+    "n_images_found": 59,
+    "centred_ra_deg": 269.4462248042906,
+    "centred_dec_deg": 4.76875930003168,
+    "n_images_processed": 58,
+    "time_to_first_cutout_s": 23.6,
+    "fetch_total_s": 195.6,
+    "n_frames": 3,
+    "total_s": 203.0,
+    "frame_dates_mjd": [
+      60908.1,
+      61129.2,
+      61272.0
+    ],
+    "gif": "examples/Barnards_Star_blink.gif",
+    "difference_peak_abs": 177.61526489257812,
+    "difference_image": "examples/Barnards_Star_difference.png",
+    "difference_epochs_mjd": [
+      60908.1,
+      61272.0
+    ],
+    "wall_clock_s": 203.0
+  },
+  {
+    "label": "Epsilon_Indi_B",
+    "query": "eps Ind B",
+    "fov_arcmin": 3.0,
+    "detectors": [
+      "D6"
+    ],
+    "resolved_ra_deg": 331.04414658852124,
+    "resolved_dec_deg": -56.782844195116105,
+    "resolution_source": "simbad",
+    "has_proper_motion": true,
+    "pmra_mas_yr": 3981.977,
+    "pmdec_mas_yr": -2466.832,
+    "discover_s": 8.8,
+    "n_images_found": 96,
+    "centred_ra_deg": 331.09681729656097,
+    "centred_dec_deg": -56.80069946587446,
+    "n_images_processed": 87,
+    "time_to_first_cutout_s": 42.8,
+    "fetch_total_s": 266.0,
+    "n_frames": 4,
+    "total_s": 276.9,
+    "frame_dates_mjd": [
+      60802.5,
+      60954.9,
+      61160.0,
+      61308.7
+    ],
+    "gif": "examples/Epsilon_Indi_B_blink.gif",
+    "difference_peak_abs": 4.583145618438721,
+    "difference_image": "examples/Epsilon_Indi_B_difference.png",
+    "difference_epochs_mjd": [
+      60802.5,
+      61308.7
+    ],
+    "wall_clock_s": 276.9
+  },
+  {
+    "label": "WISE_0855-0714",
+    "query": "WISE J085510.83-071442.5",
+    "fov_arcmin": 3.0,
+    "detectors": [
+      "D6"
+    ],
+    "resolved_ra_deg": 133.81890825,
+    "resolved_dec_deg": -7.247048000000001,
+    "resolution_source": "simbad",
+    "has_proper_motion": true,
+    "pmra_mas_yr": -8123.7,
+    "pmdec_mas_yr": 673.2,
+    "discover_s": 8.5,
+    "n_images_found": 45,
+    "centred_ra_deg": 133.75965649845617,
+    "centred_dec_deg": -7.242173226585007,
+    "n_images_processed": 42,
+    "time_to_first_cutout_s": 18.6,
+    "fetch_total_s": 128.3,
+    "n_frames": 3,
+    "total_s": 141.6,
+    "frame_dates_mjd": [
+      60800.7,
+      60996.4,
+      61157.9
+    ],
+    "gif": "examples/WISE_0855-0714_blink.gif",
+    "difference_peak_abs": 1.2218961715698242,
+    "difference_image": "examples/WISE_0855-0714_difference.png",
+    "difference_epochs_mjd": [
+      60800.7,
+      61157.9
+    ],
+    "wall_clock_s": 141.6
+  },
+  {
+    "label": "RW_Aurigae",
+    "query": "RW Aurigae",
+    "fov_arcmin": 3.0,
+    "detectors": [
+      "D6"
+    ],
+    "resolved_ra_deg": 76.95652603458333,
+    "resolved_dec_deg": 30.401438173888888,
+    "resolution_source": "simbad",
+    "has_proper_motion": true,
+    "pmra_mas_yr": 7.23,
+    "pmdec_mas_yr": -20.33,
+    "discover_s": 4.6,
+    "n_images_found": 56,
+    "centred_ra_deg": 76.95658699529905,
+    "centred_dec_deg": 30.401290327940185,
+    "n_images_processed": 55,
+    "time_to_first_cutout_s": 17.8,
+    "fetch_total_s": 106.8,
+    "n_frames": 3,
+    "total_s": 112.2,
+    "frame_dates_mjd": [
+      60936.0,
+      61096.2,
+      61298.2
+    ],
+    "gif": "examples/RW_Aurigae_blink.gif",
+    "difference_peak_abs": 85.40126037597656,
+    "difference_image": "examples/RW_Aurigae_difference.png",
+    "difference_epochs_mjd": [
+      60936.0,
+      61298.2
+    ],
+    "wall_clock_s": 112.2
+  },
+  {
+    "label": "R_Draconis",
+    "query": "R Draconis",
+    "fov_arcmin": 3.0,
+    "detectors": [
+      "D6"
+    ],
+    "resolved_ra_deg": 248.16761083295,
+    "resolved_dec_deg": 66.75497941722,
+    "resolution_source": "simbad",
+    "has_proper_motion": true,
+    "pmra_mas_yr": -20.643,
+    "pmdec_mas_yr": 6.149,
+    "discover_s": 6.1,
+    "n_images_found": 91,
+    "centred_ra_deg": 248.16723246649335,
+    "centred_dec_deg": 66.7550238974085,
+    "n_images_processed": 90,
+    "time_to_first_cutout_s": 15.5,
+    "fetch_total_s": 156.5,
+    "n_frames": 3,
+    "total_s": 164.4,
+    "frame_dates_mjd": [
+      60828.8,
+      61041.4,
+      61175.4
+    ],
+    "gif": "examples/R_Draconis_blink.gif",
+    "difference_peak_abs": 118.86552429199219,
+    "difference_image": "examples/R_Draconis_difference.png",
+    "difference_epochs_mjd": [
+      60828.8,
+      61175.4
+    ],
+    "wall_clock_s": 164.4
+  }
+]

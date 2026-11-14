@@ -177,8 +177,11 @@ Nasa_spaceapps/
 │   │   ├── simbad.py         # multi-mirror pyvo TAP client
 │   │   ├── irsa.py           # SIA/TAP discovery + cutout fetch (pool+retry)
 │   │   ├── pipeline.py       # zodi-subtract, flag-mask, reproject, combine
+│   │   ├── stream.py         # groups known pre-fetch; emits each the instant it's complete
+│   │   ├── spectrum.py       # Phase 4: native-pixel/native-wavelength forced photometry
 │   │   ├── encode.py         # EPSF strip, uint16 quantize, metadata
-│   │   └── cache.py          # in-memory TTL/LRU in-flight de-dupe
+│   │   └── cache.py          # in-memory TTL/LRU in-flight de-dupe (wired into
+│   │                         # /api/images only - see README's trade-off note)
 │   └── tests/
 │       ├── test_coords.py
 │       └── test_pipeline_live.py   # marked slow/network, opt-in

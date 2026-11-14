@@ -16,6 +16,7 @@ import io
 import time
 import random
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Optional
@@ -30,6 +31,13 @@ from astroquery.ipac.irsa import Irsa
 from .config import get_config
 
 log = logging.getLogger(__name__)
+
+# Per-request concurrency is bounded by ThreadPoolExecutor(max_workers)
+# below, but that's per *request* - if several users hit the backend at
+# once, each gets their own pool. This semaphore is process-wide, so the
+# brief's "plus a global cap across users" actually holds regardless of
+# how many concurrent requests are in flight.
+_global_fetch_semaphore = threading.BoundedSemaphore(get_config().fetch.global_concurrency_cap)
 
 # Extensions we actually use. EPSF is deliberately excluded (see module
 # docstring); WCS-WAVE is tiny (~720B) and kept for the per-pixel wavelength
@@ -124,7 +132,8 @@ def _fetch_one(record: ImageRecord, coord: SkyCoord, fov_arcmin: float, session:
 
     for attempt in range(cfg.max_retries + 1):
         try:
-            resp = session.get(url, timeout=(cfg.connect_timeout_s, cfg.read_timeout_s))
+            with _global_fetch_semaphore:
+                resp = session.get(url, timeout=(cfg.connect_timeout_s, cfg.read_timeout_s))
             if resp.status_code in cfg.retry_status_codes:
                 raise requests.HTTPError(f"{resp.status_code} {resp.text[:100]}")
             resp.raise_for_status()
