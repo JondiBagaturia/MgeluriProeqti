@@ -10,6 +10,7 @@ RUN pip install --no-cache-dir -r backend/requirements.txt
 COPY config/ config/
 COPY backend/ backend/
 COPY frontend/ frontend/
+COPY frontend-fullscreen/ frontend-fullscreen/
 
 WORKDIR /app/backend
 EXPOSE 8000

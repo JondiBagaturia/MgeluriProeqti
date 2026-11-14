@@ -61,6 +61,61 @@ docker compose up --build
 The backend is stateless (no database, no disk cache — see PLAN.md), so it
 scales horizontally behind any load balancer with zero shared state.
 
+### Switching the design
+The viewer ships with two interchangeable designs. They use the same
+backend, the same API and the same browser cache — only the page differs.
+
+| Design | Folder | Always available at | What it looks like |
+|---|---|---|---|
+| `classic` (default) | `frontend/` | `http://localhost:8000/classic/` | The original layout: controls in a sidebar, the image in a panel beside it. |
+| `fullscreen` | `frontend-fullscreen/` | `http://localhost:8000/fullscreen/` | The image fills the whole window; the controls are framed windows that stay hidden until you need them. |
+
+**To try the other design, just open its address** — both are served at
+the same time, no restart needed. Shared links keep working in either one:
+`/classic/?position=...` and `/fullscreen/?position=...` take the same
+parameters.
+
+**To change which design opens at the plain address** (`http://localhost:8000/`),
+set `SPHEREX_FRONTEND` before starting the server:
+```bash
+# Linux / macOS
+SPHEREX_FRONTEND=fullscreen uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+# Windows PowerShell
+$env:SPHEREX_FRONTEND = "fullscreen"; uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+# Docker
+SPHEREX_FRONTEND=fullscreen docker compose up --build
+```
+Leave the variable unset (or set it to `classic`) to go back to the
+original. An unknown value falls back to `classic` with a warning in the
+server log.
+
+**Using the fullscreen design**
+- Move the cursor to an edge of the window to open the window that lives
+  there: search (top), display controls (left), light curve / spectrum /
+  share (right), playback (bottom). Move away and it hides again.
+- Click the small square in a window's title bar to pin that window open.
+- Right-click the sky to open every window at once; right-click again or
+  press Esc to close them.
+- Scroll to zoom. On a touch screen, the ☰ button in the corner opens and
+  closes the windows.
+- If the IRSA archive is not answering, this design says so and retries by
+  itself with a visible countdown (the classic design does not retry on
+  its own).
+
+**Changing or adding a design**
+- Each design is a self-contained folder of static files (`index.html`,
+  `style.css`, `app.js`, ...) — edit them and reload the page, there is no
+  build step.
+- The fullscreen design's colours and frame styles are the variables at the
+  top of `frontend-fullscreen/style.css` (`:root { --ink: ...; --frame: ...}`);
+  the show/hide behaviour of its windows is in `frontend-fullscreen/ui_chrome.js`.
+- To add a third design, copy one of the folders, give it a new name, and
+  add one line to `_FRONTEND_DIRS` in `backend/app/main.py` (and a `COPY`
+  line in the `Dockerfile`). It is then served at `/<name>/` and selectable
+  with `SPHEREX_FRONTEND=<name>`.
+
 ### Command-line / data layer only
 ```bash
 python cli/spherex_blink.py "Barnard's star" --fov 3 --detectors D6 -o ./out

@@ -1,0 +1,1056 @@
+/**
+ * SPHEREx Blink — frontend application logic.
+ *
+ * Talks to the FastAPI backend's /api/resolve, /api/images and (streaming)
+ * /api/frames endpoints. All stretching/blinking/zoom happens here, client
+ * side, on cached typed arrays — the backend is only asked once per frame
+ * set, never again just because the user moved a contrast slider.
+ */
+(function () {
+  "use strict";
+
+  const API_BASE = window.SPHEREX_API_BASE || "";
+  const INVALID_SENTINEL = 65535;
+
+  // ---------------------------------------------------------------------
+  // DOM
+  // ---------------------------------------------------------------------
+  const $ = (id) => document.getElementById(id);
+  const form = $("search-form");
+  const positionInput = $("position-input");
+  const resolveStatus = $("resolve-status");
+  const fovSlider = $("fov-slider");
+  const fovValue = $("fov-value");
+  const fovWarning = $("fov-warning");
+  const modeSelect = $("mode-select");
+  const detectorFieldset = $("detector-fieldset");
+  const qualitySlider = $("quality-slider");
+  const qualityValue = $("quality-value");
+  const QUALITY_LEVELS = ["low", "mid", "high"];
+  const QUALITY_LABELS = ["Low (fastest)", "Mid (balanced)", "High (full quality)"];
+  const stretchSelect = $("stretch-select");
+  const asinhNote = $("asinh-note");
+  const blackSlider = $("black-slider");
+  const whiteSlider = $("white-slider");
+  const blackValue = $("black-value");
+  const whiteValue = $("white-value");
+  const invertCheckbox = $("invert-checkbox");
+  const zoomSlider = $("zoom-slider");
+  const zoomValue = $("zoom-value");
+  const cacheStatus = $("cache-status");
+  const clearCacheBtn = $("clear-cache-btn");
+  const shareUrlInput = $("share-url");
+  const embedSnippet = $("embed-snippet");
+  const progressWrap = $("progress-wrap");
+  const progressBar = $("progress-bar");
+  const progressText = $("progress-text");
+  const canvas = $("viewer-canvas");
+  const canvasCtx = canvas.getContext("2d");
+  const frameLabel = $("frame-label");
+  const pixelReadout = $("pixel-readout");
+  const emptyState = $("empty-state");
+  const stepBackBtn = $("step-back-btn");
+  const playBtn = $("play-btn");
+  const stepFwdBtn = $("step-fwd-btn");
+  const speedSlider = $("speed-slider");
+  const loopCheckbox = $("loop-checkbox");
+  const abCheckbox = $("ab-checkbox");
+  const frameSlider = $("frame-slider");
+  const viewModeSelect = $("view-mode-select");
+  const abPick = $("ab-pick");
+  const diffASlider = $("diff-a-slider");
+  const diffBSlider = $("diff-b-slider");
+  const contaminationSummary = $("contamination-summary");
+  const lightcurveCanvas = $("lightcurve-canvas");
+  const lightcurveCtx = lightcurveCanvas.getContext("2d");
+  const spectrumCanvas = $("spectrum-canvas");
+  const spectrumCtx = spectrumCanvas.getContext("2d");
+  const spectrumStatus = $("spectrum-status");
+
+  const stage = $("stage");
+  const crosshair = $("crosshair");
+  const fillCheckbox = $("fill-checkbox");
+  const fullscreenBtn = $("fullscreen-btn");
+
+  // ---------------------------------------------------------------------
+  // State
+  // ---------------------------------------------------------------------
+  const state = {
+    frames: [], // {groupIndex, timeMjdMean, detectors, nExposures, centralWavelengthUm, bandwidthUm, contamination, width, height, scale, offset, data: Uint16Array}
+    currentIndex: 0,
+    playing: false,
+    playTimer: null,
+    resolvedCoord: null, // {ra, dec}
+    fovArcmin: 5,
+    releaseTag: "unknown",
+    abFrames: [0, 0],
+    abPhase: 0,
+    lastRenderedGrid: null, // {width, height, values: Float32Array (NaN = no data)}
+    globalFiniteValues: null, // flat array across ALL loaded frames, for Asinh's fixed levels
+    searchGeneration: 0, // bumped by every new search; stale streams/retries check it and stop
+    retryTimer: null, // countdown to the next automatic attempt while the archive is down
+  };
+
+  // ---------------------------------------------------------------------
+  // Utilities
+  // ---------------------------------------------------------------------
+  function mjdToDate(mjd) {
+    const MJD_EPOCH_MS = Date.UTC(1858, 10, 17);
+    return new Date(MJD_EPOCH_MS + mjd * 86400000);
+  }
+
+  function fmtDate(mjd) {
+    if (mjd == null) return "?";
+    return mjdToDate(mjd).toISOString().slice(0, 10);
+  }
+
+  function base64ToUint16Array(b64) {
+    const binary = atob(b64);
+    const len = binary.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) bytes[i] = binary.charCodeAt(i);
+    return new Uint16Array(bytes.buffer);
+  }
+
+  function selectedDetectors() {
+    return Array.from(detectorFieldset.querySelectorAll("input[type=checkbox]:checked")).map((el) => el.value);
+  }
+
+  function setDetectors(list) {
+    const set = new Set(list);
+    detectorFieldset.querySelectorAll("input[type=checkbox]").forEach((el) => {
+      el.checked = set.has(el.value);
+    });
+  }
+
+  // ---------------------------------------------------------------------
+  // URL state
+  // ---------------------------------------------------------------------
+  function readUrlState() {
+    const params = new URLSearchParams(location.search);
+    const quality = params.get("quality") || "mid";
+    return {
+      position: params.get("position") || "",
+      fov: parseFloat(params.get("fov")) || 5,
+      detectors: (params.get("detectors") || "D2,D6").split(",").filter(Boolean),
+      mode: params.get("mode") || "epoch",
+      quality: QUALITY_LEVELS.includes(quality) ? quality : "mid",
+    };
+  }
+
+  function writeUrlState({ position, fov, detectors, mode, quality }) {
+    const params = new URLSearchParams();
+    params.set("position", position);
+    params.set("fov", fov);
+    params.set("detectors", detectors.join(","));
+    params.set("mode", mode);
+    params.set("quality", quality);
+    const url = `${location.pathname}?${params.toString()}`;
+    history.replaceState(null, "", url);
+    const fullUrl = location.origin + url;
+    shareUrlInput.value = fullUrl;
+    embedSnippet.value = `<iframe src="${fullUrl}" width="600" height="700" loading="lazy"></iframe>`;
+  }
+
+  // ---------------------------------------------------------------------
+  // Form wiring
+  // ---------------------------------------------------------------------
+  fovSlider.addEventListener("input", () => {
+    fovValue.textContent = `${fovSlider.value}′`;
+    fovWarning.hidden = parseFloat(fovSlider.value) <= 15;
+  });
+  qualitySlider.addEventListener("input", () => {
+    qualityValue.textContent = QUALITY_LABELS[parseInt(qualitySlider.value, 10)];
+  });
+  blackSlider.addEventListener("input", () => {
+    blackValue.textContent = `${blackSlider.value}%`;
+    renderView();
+  });
+  whiteSlider.addEventListener("input", () => {
+    whiteValue.textContent = `${whiteSlider.value}%`;
+    renderView();
+  });
+  function updateStretchControlsEnabled() {
+    const isAsinh = stretchSelect.value === "asinh";
+    blackSlider.disabled = isAsinh;
+    whiteSlider.disabled = isAsinh;
+    asinhNote.hidden = !isAsinh;
+  }
+  stretchSelect.addEventListener("change", () => {
+    updateStretchControlsEnabled();
+    renderView();
+  });
+  updateStretchControlsEnabled();
+  invertCheckbox.addEventListener("change", renderView);
+  // The canvas holds exactly one canvas pixel per grid pixel; its on-screen
+  // size is pure CSS (crisp nearest-neighbour scaling via
+  // image-rendering: pixelated). Zoom 1× fits the whole field inside the
+  // window - or covers the window when "Fill the screen" is ticked - and
+  // higher zoom magnifies about the centre, which is always the target.
+  function layoutCanvas() {
+    const rect = stage.getBoundingClientRect();
+    const fit = fillCheckbox.checked ? Math.max(rect.width, rect.height) : Math.min(rect.width, rect.height);
+    const size = Math.round(fit * parseFloat(zoomSlider.value));
+    canvas.style.width = `${size}px`;
+    canvas.style.height = `${Math.round((size * canvas.height) / canvas.width)}px`;
+  }
+  zoomSlider.addEventListener("input", () => {
+    zoomValue.textContent = `${zoomSlider.value}×`;
+    layoutCanvas();
+  });
+  fillCheckbox.addEventListener("change", layoutCanvas);
+  window.addEventListener("resize", layoutCanvas);
+  stage.addEventListener(
+    "wheel",
+    (ev) => {
+      if (state.frames.length === 0) return;
+      ev.preventDefault();
+      const step = ev.deltaY < 0 ? 0.25 : -0.25;
+      const next = Math.min(parseFloat(zoomSlider.max), Math.max(parseFloat(zoomSlider.min), parseFloat(zoomSlider.value) + step));
+      zoomSlider.value = next;
+      zoomSlider.dispatchEvent(new Event("input"));
+    },
+    { passive: false }
+  );
+  fullscreenBtn.addEventListener("click", () => {
+    if (document.fullscreenElement) document.exitFullscreen();
+    else if (document.documentElement.requestFullscreen) document.documentElement.requestFullscreen().catch(() => {});
+  });
+  layoutCanvas();
+  blackValue.textContent = `${blackSlider.value}%`;
+  whiteValue.textContent = `${whiteSlider.value}%`;
+
+  clearCacheBtn.addEventListener("click", async () => {
+    await window.SpherexCache.clearAll();
+    updateCacheStatus();
+  });
+
+  async function updateCacheStatus() {
+    const bytes = await window.SpherexCache.totalSizeBytes();
+    cacheStatus.textContent = `${(bytes / (1024 * 1024)).toFixed(1)} MB cached locally`;
+  }
+
+  // ---------------------------------------------------------------------
+  // Search / streaming
+  // ---------------------------------------------------------------------
+  form.addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    runSearch();
+  });
+
+  async function fetchReleaseTag() {
+    try {
+      const resp = await fetch(`${API_BASE}/api/releases`);
+      if (!resp.ok) return "unknown";
+      const data = await resp.json();
+      return (data.collections || []).slice().sort().join(",") || "unknown";
+    } catch (e) {
+      return "unknown";
+    }
+  }
+
+  async function runSearch() {
+    const position = positionInput.value.trim();
+    if (!position) return;
+    const fov = parseFloat(fovSlider.value);
+    const detectors = selectedDetectors();
+    const mode = modeSelect.value;
+    const quality = QUALITY_LEVELS[parseInt(qualitySlider.value, 10)];
+
+    if (detectors.length === 0) {
+      resolveStatus.textContent = "Pick at least one detector.";
+      resolveStatus.className = "status-text error";
+      return;
+    }
+
+    cancelRetry();
+    const generation = ++state.searchGeneration; // invalidates any earlier stream or pending retry
+    stopPlayback();
+    state.frames = [];
+    state.currentIndex = 0;
+    frameSlider.max = 0;
+    frameSlider.value = 0;
+    emptyState.hidden = true;
+    frameLabel.textContent = "";
+    canvasCtx.clearRect(0, 0, canvas.width, canvas.height);
+    crosshair.hidden = true;
+
+    resolveStatus.textContent = "Resolving…";
+    resolveStatus.className = "status-text";
+
+    let resolved;
+    try {
+      const resp = await fetch(`${API_BASE}/api/resolve?position=${encodeURIComponent(position)}`);
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({ detail: resp.statusText }));
+        throw new Error(err.detail || resp.statusText);
+      }
+      resolved = await resp.json();
+    } catch (e) {
+      resolveStatus.textContent = `Could not resolve: ${e.message}`;
+      resolveStatus.className = "status-text error";
+      return;
+    }
+
+    state.resolvedCoord = { ra: resolved.ra_deg, dec: resolved.dec_deg };
+    state.fovArcmin = fov;
+
+    let statusMsg = `${resolved.name || position} → RA ${resolved.ra_deg.toFixed(5)}, Dec ${resolved.dec_deg.toFixed(5)}`;
+    if (resolved.has_proper_motion) statusMsg += ` (proper motion known, propagated per epoch)`;
+    resolveStatus.textContent = statusMsg;
+    resolveStatus.className = "status-text";
+
+    writeUrlState({ position, fov, detectors, mode, quality });
+
+    if (state.releaseTag === "unknown") {
+      state.releaseTag = await fetchReleaseTag();
+    }
+
+    const cacheKey = window.SpherexCache.makeKey({
+      release: state.releaseTag,
+      ra: resolved.ra_deg,
+      dec: resolved.dec_deg,
+      fov,
+      group: `${mode}:${quality}`, // quality changes the actual pixel content, so it must be part of the key
+      detector: detectors.slice().sort().join(""),
+    });
+
+    progressWrap.hidden = false;
+    progressBar.style.width = "0%";
+    progressText.textContent = "Checking local cache…";
+
+    const cached = await window.SpherexCache.get(cacheKey);
+    if (cached && cached.length) {
+      state.frames = cached.map(reviveFrame);
+      sortAndShowFirst();
+      progressText.textContent = `Loaded ${cached.length} frame(s) from local cache`;
+      progressBar.style.width = "100%";
+      setTimeout(() => (progressWrap.hidden = true), 1500);
+      return; // cache hit: no network call for pixels at all
+    }
+
+    progressText.textContent = "Fetching from IRSA…";
+    streamFrames({ position, fov, detectors, mode, quality, cacheKey }, generation, 1);
+  }
+
+  // ---------------------------------------------------------------------
+  // Automatic retry while the archive is down
+  //
+  // IRSA's search service drops out for minutes at a time (the server then
+  // reports e.g. "SIA query failed: 502 Proxy Error"). Rather than leave
+  // the user pressing Go, a search that ended with an archive error and no
+  // frames is repeated on a slowing schedule, with a visible countdown and
+  // a way to stop. A new search (or Stop) cancels it.
+  // ---------------------------------------------------------------------
+  const RETRY_DELAYS_S = [5, 10, 15, 20, 30]; // then 30s between attempts
+  const MAX_AUTO_RETRIES = 60; // about half an hour in total
+
+  function cancelRetry() {
+    if (state.retryTimer) {
+      clearInterval(state.retryTimer);
+      state.retryTimer = null;
+    }
+  }
+
+  function showArchiveMessage(text, withStopButton) {
+    emptyState.textContent = "";
+    const message = document.createElement("span");
+    message.textContent = text;
+    emptyState.appendChild(message);
+    if (withStopButton) {
+      const stopBtn = document.createElement("button");
+      stopBtn.type = "button";
+      stopBtn.className = "text-btn";
+      stopBtn.textContent = "Stop retrying";
+      stopBtn.addEventListener("click", () => {
+        cancelRetry();
+        showArchiveMessage("Stopped. Press Go to try again.", false);
+      });
+      emptyState.appendChild(stopBtn);
+    }
+    emptyState.hidden = false;
+    return message;
+  }
+
+  function scheduleRetry(request, generation, attempt, errorText) {
+    cancelRetry();
+    progressWrap.hidden = true;
+    const details = `Details: ${errorText.slice(0, 160)}`;
+    if (attempt >= MAX_AUTO_RETRIES) {
+      showArchiveMessage(`The IRSA archive has not answered after ${attempt} attempts. Press Go to try again later.\n\n${details}`, false);
+      return;
+    }
+    let secondsLeft = RETRY_DELAYS_S[Math.min(attempt - 1, RETRY_DELAYS_S.length - 1)];
+    const text = () =>
+      `The IRSA archive is not answering (attempt ${attempt}). Trying again in ${secondsLeft} s.\n\n${details}`;
+    const message = showArchiveMessage(text(), true);
+    state.retryTimer = setInterval(() => {
+      if (generation !== state.searchGeneration) return cancelRetry();
+      secondsLeft -= 1;
+      if (secondsLeft > 0) {
+        message.textContent = text();
+        return;
+      }
+      cancelRetry();
+      emptyState.hidden = true;
+      progressWrap.hidden = false;
+      progressBar.style.width = "0%";
+      progressText.textContent = `Fetching from IRSA… (attempt ${attempt + 1})`;
+      streamFrames(request, generation, attempt + 1);
+    }, 1000);
+  }
+
+  function reviveFrame(stored) {
+    return { ...stored, data: new Uint16Array(stored.data) };
+  }
+
+  async function streamFrames(request, generation, attempt) {
+    const { position, fov, detectors, mode, quality, cacheKey } = request;
+    const url = `${API_BASE}/api/frames?position=${encodeURIComponent(position)}&fov=${fov}&detectors=${detectors.join(",")}&group=${mode}&quality=${quality}`;
+    let resp;
+    try {
+      // no-store: the server marks this response cacheable for 5 minutes
+      // before it knows how the stream will end, so without this a failed
+      // attempt (IRSA down) is replayed from the browser's HTTP cache on
+      // every retry. Successful sets are cached in IndexedDB instead.
+      resp = await fetch(url, { cache: "no-store" });
+    } catch (e) {
+      progressText.textContent = `Network error: ${e.message}`;
+      return;
+    }
+    if (!resp.ok || !resp.body) {
+      progressText.textContent = `Server error (${resp.status})`;
+      return;
+    }
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let nGroups = null;
+    let received = 0;
+    let firstFrameShown = false;
+    let streamError = null; // last {"error": ...} line the server sent, if any
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (generation !== state.searchGeneration) {
+        reader.cancel().catch(() => {}); // a newer search has started; drop this one
+        return;
+      }
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let newlineIdx;
+      while ((newlineIdx = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, newlineIdx);
+        buffer = buffer.slice(newlineIdx + 1);
+        if (!line.trim()) continue;
+        let obj;
+        try {
+          obj = JSON.parse(line);
+        } catch (e) {
+          continue;
+        }
+        if (obj.error) {
+          streamError = obj.error;
+          progressText.textContent = `Error: ${obj.error}`;
+          continue;
+        }
+        nGroups = obj.n_groups || nGroups;
+        const frame = {
+          groupIndex: obj.group_index,
+          timeMjdMean: obj.time_mjd_mean,
+          timeMjdMin: obj.time_mjd_min,
+          timeMjdMax: obj.time_mjd_max,
+          detectors: obj.detectors,
+          nExposures: obj.n_exposures,
+          centralWavelengthUm: obj.central_wavelength_um,
+          bandwidthUm: obj.bandwidth_um,
+          contamination: obj.contamination,
+          releaseVersions: obj.release_versions,
+          partial: obj.partial,
+          nGapFilledPixels: obj.n_gap_filled_pixels,
+          width: obj.width,
+          height: obj.height,
+          scale: obj.scale,
+          offset: obj.offset,
+          data: base64ToUint16Array(obj.payload_b64),
+        };
+        state.frames.push(frame);
+        received++;
+        if (nGroups) {
+          progressBar.style.width = `${Math.min(100, (received / nGroups) * 100)}%`;
+          progressText.textContent = `${received} / ${nGroups} frame(s) ready`;
+        } else {
+          progressText.textContent = `${received} frame(s) ready`;
+        }
+        if (!firstFrameShown) {
+          firstFrameShown = true;
+          sortAndShowFirst();
+        } else {
+          // Frames can complete out of chronological order (a later epoch
+          // can finish before an earlier one). Re-sorting by groupIndex can
+          // move the frame the user is currently looking at to a different
+          // array slot, so track it by identity across the sort rather than
+          // leaving `currentIndex` pointing at whatever slot it used to be.
+          const shownGroupIndex = state.frames[state.currentIndex]
+            ? state.frames[state.currentIndex].groupIndex
+            : null;
+          sortFrames();
+          if (shownGroupIndex != null) {
+            const newIdx = state.frames.findIndex((f) => f.groupIndex === shownGroupIndex);
+            if (newIdx >= 0) state.currentIndex = newIdx;
+          }
+          updateFrameSlider();
+          // Re-render: cheap for these small arrays, and keeps the "Frame
+          // X/Y" count and light curve in sync as the total grows, even
+          // when the user is sitting on an already-rendered frame.
+          renderView();
+        }
+      }
+    }
+
+    if (state.frames.length === 0) {
+      // Two different situations end with nothing to show; say which one.
+      // The server reported a failure (IRSA unreachable or busy): that is
+      // not "no images here", and trying again later usually works - so
+      // that case retries by itself (see scheduleRetry).
+      if (streamError) {
+        scheduleRetry(request, generation, attempt, streamError);
+        return;
+      }
+      progressWrap.hidden = true;
+      emptyState.hidden = false;
+      emptyState.textContent = "No SPHEREx images found at this position/FOV/detector selection.";
+      return;
+    }
+
+    progressText.textContent = streamError
+      ? `${state.frames.length} frame(s) loaded; the archive reported an error: ${streamError.slice(0, 120)}`
+      : `Done: ${state.frames.length} frame(s)`;
+    setTimeout(() => (progressWrap.hidden = true), streamError ? 8000 : 2000);
+
+
+    // Cache the whole set now that the stream is complete.
+    const serializable = state.frames.map((f) => ({ ...f, data: f.data.buffer.slice(0) }));
+    const approxBytes = serializable.reduce((s, f) => s + f.data.byteLength, 0);
+    window.SpherexCache.put(cacheKey, serializable, approxBytes);
+    updateCacheStatus();
+  }
+
+  function sortFrames() {
+    state.frames.sort((a, b) => a.groupIndex - b.groupIndex);
+  }
+
+  function sortAndShowFirst() {
+    sortFrames();
+    state.currentIndex = 0;
+    updateFrameSlider();
+    renderView();
+  }
+
+  function updateFrameSlider() {
+    const maxIdx = Math.max(0, state.frames.length - 1);
+    frameSlider.max = maxIdx;
+    frameSlider.value = state.currentIndex;
+    diffASlider.max = maxIdx;
+    diffBSlider.max = maxIdx;
+    if (diffBSlider.value == 0 && maxIdx > 0) diffBSlider.value = maxIdx; // default B to the latest epoch
+    if (state.frames.length) emptyState.hidden = true;
+    recomputeGlobalFiniteValues();
+    drawLightCurve();
+  }
+
+  // ---------------------------------------------------------------------
+  // Stretch / rendering
+  // ---------------------------------------------------------------------
+  // Asinh is a faithful port of a teammate's renderer
+  // (github.com/DmaniseliMgeli/planet-x, phase1-check/phase1/blink.py):
+  // astropy's AsinhStretch(a=0.05) - y = asinh(x/a)/asinh(1/a), same form
+  // as our existing formula with A = 1/a = 20 - with vmin/vmax fixed at
+  // the median and 99.8th percentile, computed once across every loaded
+  // frame (not per-frame), so contrast stays consistent through the
+  // blink instead of jumping epoch to epoch. That global computation
+  // lives in recomputeGlobalFiniteValues() below; the black/white
+  // sliders are inactive for this mode (their script has no adjustable
+  // levels), active as before for Linear/Zscale.
+  const ASINH_A = 1 / 0.05; // = 20
+
+  function computeLevels(finiteValues, mode, blackPct, whitePct) {
+    if (finiteValues.length === 0) return { black: 0, white: 1 };
+    const sorted = Array.from(finiteValues).sort((a, b) => a - b);
+    const pct = (p) => sorted[Math.min(sorted.length - 1, Math.max(0, Math.floor((p / 100) * (sorted.length - 1))))];
+    if (mode === "zscale") {
+      const median = pct(50);
+      const absDev = sorted.map((v) => Math.abs(v - median));
+      absDev.sort((a, b) => a - b);
+      const mad = absDev[Math.floor(absDev.length / 2)] || 1e-6;
+      const sigma = mad * 1.4826;
+      return { black: median - 1 * sigma, white: median + 5 * sigma };
+    }
+    if (mode === "asinh") {
+      return { black: pct(50), white: pct(99.8) };
+    }
+    return { black: pct(blackPct), white: pct(whitePct) };
+  }
+
+  function stretchValue(phys, black, white, mode, invert) {
+    let t;
+    const range = white - black || 1e-9;
+    if (mode === "asinh") {
+      const lin = (phys - black) / range;
+      t = Math.asinh(lin * ASINH_A) / Math.asinh(ASINH_A);
+    } else {
+      t = (phys - black) / range;
+    }
+    t = Math.min(1, Math.max(0, t));
+    if (invert) t = 1 - t;
+    return Math.round(t * 255);
+  }
+
+  /** Levels for Asinh mode come from every currently-loaded frame
+   * combined, not just the one on screen - recomputed whenever the frame
+   * set changes (see updateFrameSlider). */
+  function recomputeGlobalFiniteValues() {
+    if (state.frames.length === 0) {
+      state.globalFiniteValues = null;
+      return;
+    }
+    const all = [];
+    for (const f of state.frames) {
+      const v = physicalValuesForFrame(f);
+      for (let i = 0; i < v.length; i++) if (Number.isFinite(v[i])) all.push(v[i]);
+    }
+    state.globalFiniteValues = all;
+  }
+
+  /** Raw uint16+scale/offset -> physical values, NaN where there's no data. */
+  function physicalValuesForFrame(frame) {
+    const out = new Float32Array(frame.data.length);
+    for (let i = 0; i < frame.data.length; i++) {
+      out[i] = frame.data[i] === INVALID_SENTINEL ? NaN : frame.data[i] * frame.scale + frame.offset;
+    }
+    return out;
+  }
+
+  /** Entry point for all three view modes: dispatches, then draws a
+   * physical-value grid common to blink/difference/sum so the stretch,
+   * zoom, and crosshair code only has to exist once. */
+  function renderView() {
+    if (state.frames.length === 0) return;
+    const viewMode = viewModeSelect.value;
+
+    if (viewMode === "difference") {
+      const a = state.frames[Math.min(diffASlider.value, state.frames.length - 1)];
+      const b = state.frames[Math.min(diffBSlider.value, state.frames.length - 1)];
+      const va = physicalValuesForFrame(a);
+      const vb = physicalValuesForFrame(b);
+      const diff = new Float32Array(va.length);
+      for (let i = 0; i < diff.length; i++) diff[i] = vb[i] - va[i]; // NaN propagates if either side is NaN
+      renderGrid(a.width, a.height, diff, { useGlobalAsinhLevels: false });
+      frameLabel.textContent =
+        `Difference: epoch @ ${fmtDate(b.timeMjdMean)}  −  epoch @ ${fmtDate(a.timeMjdMean)}\n` +
+        `A moving/variable source shows as a dark/bright dipole pair.`;
+    } else if (viewMode === "sum") {
+      const first = state.frames[0];
+      const sum = new Float32Array(first.width * first.height);
+      const count = new Float32Array(sum.length);
+      for (const f of state.frames) {
+        const v = physicalValuesForFrame(f);
+        for (let i = 0; i < v.length; i++) {
+          if (Number.isFinite(v[i])) {
+            sum[i] += v[i];
+            count[i] += 1;
+          }
+        }
+      }
+      const mean = new Float32Array(sum.length);
+      for (let i = 0; i < sum.length; i++) mean[i] = count[i] > 0 ? sum[i] / count[i] : NaN;
+      renderGrid(first.width, first.height, mean, { useGlobalAsinhLevels: false });
+      frameLabel.textContent = `Sum of all ${state.frames.length} epoch(s) — a persistent faint source stands out; a mover smears out.`;
+    } else {
+      const frame = state.frames[state.currentIndex];
+      renderGrid(frame.width, frame.height, physicalValuesForFrame(frame), { useGlobalAsinhLevels: true });
+      updateFrameLabel(frame);
+    }
+    updateContaminationSummary();
+  }
+  function renderGrid(width, height, values, { useGlobalAsinhLevels = true } = {}) {
+    state.lastRenderedGrid = { width, height, values };
+    const mode = stretchSelect.value;
+
+    // Asinh's levels come from every loaded frame combined (see
+    // recomputeGlobalFiniteValues) ONLY for the plain blink view - those
+    // are raw per-epoch flux values (roughly 0..300 MJy/sr). Difference
+    // and Sum pass useGlobalAsinhLevels:false because their arrays are a
+    // different quantity entirely (differences centred near 0, including
+    // negatives; sums on a different scale) - using the blink levels on
+    // those made the display look badly broken (everything clipped to
+    // one extreme, since the white point was calibrated for raw flux, not
+    // for small +/- differences). Falls back to this grid's own values if
+    // the global cache is somehow empty.
+    let physValues;
+    if (mode === "asinh" && useGlobalAsinhLevels && state.globalFiniteValues && state.globalFiniteValues.length) {
+      physValues = state.globalFiniteValues;
+    } else {
+      physValues = [];
+      for (let i = 0; i < values.length; i++) if (Number.isFinite(values[i])) physValues.push(values[i]);
+    }
+
+    const blackPct = parseFloat(blackSlider.value);
+    const whitePct = parseFloat(whiteSlider.value);
+    const { black, white } = computeLevels(physValues, mode, blackPct, whitePct);
+    const invert = invertCheckbox.checked;
+
+    const rgba = new Uint8ClampedArray(width * height * 4);
+    for (let i = 0; i < values.length; i++) {
+      const o = i * 4;
+      if (!Number.isFinite(values[i])) {
+        rgba[o + 3] = 0;
+        continue;
+      }
+      const g = stretchValue(values[i], black, white, mode, invert);
+      rgba[o] = g;
+      rgba[o + 1] = g;
+      rgba[o + 2] = g;
+      rgba[o + 3] = 255;
+    }
+
+    // One canvas pixel per grid pixel; on-screen size and zoom are CSS
+    // (see layoutCanvas). Setting width/height also clears the canvas.
+    if (canvas.width !== width) canvas.width = width;
+    if (canvas.height !== height) canvas.height = height;
+    canvasCtx.putImageData(new ImageData(rgba, width, height), 0, 0);
+    layoutCanvas();
+
+    // Crosshair on the target (always the grid centre, by construction):
+    // a CSS overlay at the stage centre (#crosshair in style.css) rather
+    // than strokes in the canvas, so it keeps a constant on-screen size at
+    // any zoom. Colour/gapped style still matches the planet-x renderer's
+    // blink.py (fill=(255,80,80)).
+    crosshair.hidden = false;
+  }
+
+  function updateContaminationSummary() {
+    const viewMode = viewModeSelect.value;
+    if (viewMode !== "blink" || state.frames.length === 0) {
+      contaminationSummary.textContent = "";
+      return;
+    }
+    const c = state.frames[state.currentIndex].contamination || {};
+    const parts = Object.entries(c)
+      .filter(([name]) => name !== "SOURCE") // benign - "a source is here", not an artifact
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5)
+      .map(([name, count]) => `${name} (${count}px)`);
+    contaminationSummary.textContent = parts.length
+      ? `Flagged in this frame: ${parts.join(", ")}`
+      : "No notable flags in this frame.";
+  }
+
+  function updateFrameLabel(frame) {
+    const waveStr =
+      frame.centralWavelengthUm != null
+        ? `${(frame.centralWavelengthUm - (frame.bandwidthUm || 0) / 2).toFixed(2)}–${(
+            frame.centralWavelengthUm + (frame.bandwidthUm || 0) / 2
+          ).toFixed(2)} µm`
+        : "?";
+    const dateRange =
+      frame.timeMjdMin === frame.timeMjdMax
+        ? fmtDate(frame.timeMjdMin)
+        : `${fmtDate(frame.timeMjdMin)}…${fmtDate(frame.timeMjdMax)}`;
+    const partial = frame.partial ? "  [partial: some exposures failed to fetch]" : "";
+    const gapFilled = frame.nGapFilledPixels
+      ? `  [${frame.nGapFilledPixels}px interpolated - SPHEREx flags the peak of bright sources in every exposure]`
+      : "";
+    frameLabel.textContent =
+      `Frame ${state.currentIndex + 1}/${state.frames.length}   ${dateRange}\n` +
+      `Detectors: ${frame.detectors.join(",")}   λ ${waveStr}\n` +
+      `${frame.nExposures} exposure(s) combined${partial}${gapFilled}`;
+  }
+
+  // ---------------------------------------------------------------------
+  // Light curve: flux at the target pixel vs time (Phase 3).
+  //
+  // This reads the single pixel at the grid centre, which by construction
+  // (app/pipeline.py's make_target_wcs) is always the target position —
+  // it is NOT aperture or PSF photometry (that's the Phase 4 bonus
+  // feature), so a few mis-centred or noisy pixels can swing it. Good
+  // enough to catch an obviously variable star like RW Aurigae or R
+  // Draconis; not a substitute for real photometry.
+  // ---------------------------------------------------------------------
+  function centrePixelFlux(frame) {
+    const cx = Math.floor(frame.width / 2);
+    const cy = Math.floor(frame.height / 2);
+    const raw = frame.data[cy * frame.width + cx];
+    return raw === INVALID_SENTINEL ? NaN : raw * frame.scale + frame.offset;
+  }
+
+  function drawLightCurve() {
+    const w = lightcurveCanvas.width;
+    const h = lightcurveCanvas.height;
+    lightcurveCtx.clearRect(0, 0, w, h);
+    if (state.frames.length === 0) return;
+
+    const points = state.frames.map((f, i) => ({ t: f.timeMjdMean, flux: centrePixelFlux(f), i }));
+    const finitePoints = points.filter((p) => Number.isFinite(p.flux));
+    if (finitePoints.length === 0) {
+      lightcurveCtx.fillStyle = "#8b96ab";
+      lightcurveCtx.fillText("No valid flux at the target pixel in any frame.", 10, h / 2);
+      return;
+    }
+
+    const tMin = Math.min(...points.map((p) => p.t));
+    const tMax = Math.max(...points.map((p) => p.t)) || tMin + 1;
+    const fluxMin = Math.min(...finitePoints.map((p) => p.flux));
+    const fluxMax = Math.max(...finitePoints.map((p) => p.flux));
+    const pad = 16;
+    const xOf = (t) => pad + ((t - tMin) / (tMax - tMin || 1)) * (w - 2 * pad);
+    const yOf = (f) => h - pad - ((f - fluxMin) / (fluxMax - fluxMin || 1)) * (h - 2 * pad);
+
+    lightcurveCtx.strokeStyle = "#5fb0ff";
+    lightcurveCtx.lineWidth = 1.5;
+    lightcurveCtx.beginPath();
+    finitePoints.forEach((p, idx) => {
+      const x = xOf(p.t);
+      const y = yOf(p.flux);
+      if (idx === 0) lightcurveCtx.moveTo(x, y);
+      else lightcurveCtx.lineTo(x, y);
+    });
+    lightcurveCtx.stroke();
+
+    for (const p of points) {
+      const x = xOf(p.t);
+      const y = Number.isFinite(p.flux) ? yOf(p.flux) : h - pad;
+      const isCurrent = viewModeSelect.value === "blink" && p.i === state.currentIndex;
+      lightcurveCtx.fillStyle = Number.isFinite(p.flux) ? (isCurrent ? "#ffb454" : "#5fb0ff") : "#555";
+      lightcurveCtx.beginPath();
+      lightcurveCtx.arc(x, y, isCurrent ? 4 : 2.5, 0, 2 * Math.PI);
+      lightcurveCtx.fill();
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // Pixel readout (approximate tangent-plane RA/Dec from the known centre)
+  // ---------------------------------------------------------------------
+  /** Map a mouse event on #viewer-canvas to {px, py, ra, dec, phys} in the
+   * currently-rendered grid, or null if the cursor is outside it / there's
+   * nothing rendered yet. Shared by the hover readout and the spectrum
+   * click handler below. */
+  function pixelAtEvent(ev) {
+    const grid = state.lastRenderedGrid;
+    if (!grid || !state.resolvedCoord) return null;
+    const rect = canvas.getBoundingClientRect();
+    const canvasX = ((ev.clientX - rect.left) / rect.width) * canvas.width;
+    const canvasY = ((ev.clientY - rect.top) / rect.height) * canvas.height;
+    const px = Math.floor(canvasX); // canvas pixels are grid pixels (see renderGrid)
+    const py = Math.floor(canvasY);
+    if (px < 0 || py < 0 || px >= grid.width || py >= grid.height) return null;
+
+    const pixelScaleArcsec = (state.fovArcmin * 60) / grid.width;
+    const dx = (px - grid.width / 2) * pixelScaleArcsec;
+    const dy = (grid.height / 2 - py) * pixelScaleArcsec;
+    const decRad = (state.resolvedCoord.dec * Math.PI) / 180;
+    const ra = state.resolvedCoord.ra - dx / 3600 / Math.cos(decRad);
+    const dec = state.resolvedCoord.dec + dy / 3600;
+    const phys = grid.values[py * grid.width + px];
+    return { px, py, ra, dec, phys };
+  }
+
+  canvas.addEventListener("mousemove", (ev) => {
+    const hit = pixelAtEvent(ev);
+    if (!hit) {
+      pixelReadout.textContent = "";
+      return;
+    }
+    pixelReadout.textContent = Number.isFinite(hit.phys)
+      ? `RA ${hit.ra.toFixed(5)}  Dec ${hit.dec.toFixed(5)}   flux ${hit.phys.toFixed(4)} MJy/sr`
+      : `RA ${hit.ra.toFixed(5)}  Dec ${hit.dec.toFixed(5)}   no data`;
+  });
+  canvas.addEventListener("mouseleave", () => (pixelReadout.textContent = ""));
+
+  // ---------------------------------------------------------------------
+  // Spectrum (Phase 4, bonus): click a pixel -> flux vs wavelength
+  // ---------------------------------------------------------------------
+  canvas.addEventListener("click", (ev) => {
+    const hit = pixelAtEvent(ev);
+    if (!hit) return;
+    fetchAndDrawSpectrum(hit.ra, hit.dec);
+  });
+
+  async function fetchAndDrawSpectrum(ra, dec) {
+    spectrumStatus.textContent = "Fetching spectrum from IRSA (re-queries all 6 detectors — this takes a while)…";
+    spectrumCtx.clearRect(0, 0, spectrumCanvas.width, spectrumCanvas.height);
+    try {
+      const url = `${API_BASE}/api/spectrum?position=${ra.toFixed(6)},${dec.toFixed(6)}&fov=${state.fovArcmin}`;
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error(`server error (${resp.status})`);
+      const points = await resp.json();
+      drawSpectrum(points);
+      const nGood = points.filter((p) => p.flux != null).length;
+      spectrumStatus.textContent = nGood
+        ? `${nGood} of ${points.length} exposure(s) usable at RA ${ra.toFixed(4)}, Dec ${dec.toFixed(4)}.`
+        : `No unmasked flux found at RA ${ra.toFixed(4)}, Dec ${dec.toFixed(4)} — too faint, or always flagged.`;
+    } catch (e) {
+      spectrumStatus.textContent = `Spectrum failed: ${e.message}`;
+    }
+  }
+
+  function drawSpectrum(points) {
+    const w = spectrumCanvas.width;
+    const h = spectrumCanvas.height;
+    spectrumCtx.clearRect(0, 0, w, h);
+    const good = points.filter((p) => p.flux != null && p.wavelength_um != null);
+    if (good.length === 0) return;
+
+    const wMin = Math.min(...good.map((p) => p.wavelength_um));
+    const wMax = Math.max(...good.map((p) => p.wavelength_um));
+    const fMin = Math.min(...good.map((p) => p.flux));
+    const fMax = Math.max(...good.map((p) => p.flux));
+    const tMin = Math.min(...good.map((p) => p.time_mjd));
+    const tMax = Math.max(...good.map((p) => p.time_mjd)) || tMin + 1;
+    const pad = 14;
+    const xOf = (wl) => pad + ((wl - wMin) / (wMax - wMin || 1)) * (w - 2 * pad);
+    const yOf = (f) => h - pad - ((f - fMin) / (fMax - fMin || 1)) * (h - 2 * pad);
+
+    for (const p of good) {
+      // Coloured by epoch (time), per the brief: blue (early) -> red (late).
+      const hue = 220 - 220 * ((p.time_mjd - tMin) / (tMax - tMin || 1));
+      spectrumCtx.fillStyle = `hsl(${hue}, 80%, 60%)`;
+      spectrumCtx.beginPath();
+      spectrumCtx.arc(xOf(p.wavelength_um), yOf(p.flux), 2.5, 0, 2 * Math.PI);
+      spectrumCtx.fill();
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // Playback
+  // ---------------------------------------------------------------------
+  function stopPlayback() {
+    state.playing = false;
+    playBtn.textContent = "▶";
+    if (state.playTimer) {
+      clearInterval(state.playTimer);
+      state.playTimer = null;
+    }
+  }
+
+  function startPlayback() {
+    if (state.frames.length < 2) {
+      // Previously a silent no-op - nothing told you why Play did nothing
+      // if the search only turned up 0 or 1 usable frame.
+      progressText.textContent =
+        state.frames.length === 0
+          ? "No frames loaded yet - nothing to play."
+          : "Only 1 frame loaded - need at least 2 to blink. Try a larger FOV, more detectors, or a different grouping.";
+      progressWrap.hidden = false;
+      return;
+    }
+    state.playing = true;
+    playBtn.textContent = "⏸";
+    const tick = () => {
+      if (abCheckbox.checked) {
+        state.abPhase = 1 - state.abPhase;
+        showFrame(state.abFrames[state.abPhase]);
+      } else {
+        let next = state.currentIndex + 1;
+        if (next >= state.frames.length) {
+          if (!loopCheckbox.checked) {
+            stopPlayback();
+            return;
+          }
+          next = 0;
+        }
+        showFrame(next);
+      }
+    };
+    const speed = parseInt(speedSlider.value, 10); // 1 (slow) .. 10 (fast)
+    const intervalMs = 900 - speed * 80;
+    state.playTimer = setInterval(tick, Math.max(60, intervalMs));
+  }
+
+  function showFrame(index) {
+    state.currentIndex = index;
+    frameSlider.value = index;
+    renderView();
+    drawLightCurve();
+  }
+
+  playBtn.addEventListener("click", () => (state.playing ? stopPlayback() : startPlayback()));
+  stepBackBtn.addEventListener("click", () => {
+    stopPlayback();
+    showFrame(Math.max(0, state.currentIndex - 1));
+  });
+  stepFwdBtn.addEventListener("click", () => {
+    stopPlayback();
+    showFrame(Math.min(state.frames.length - 1, state.currentIndex + 1));
+  });
+  frameSlider.addEventListener("input", () => {
+    stopPlayback();
+    showFrame(parseInt(frameSlider.value, 10));
+  });
+  speedSlider.addEventListener("input", () => {
+    if (state.playing) {
+      stopPlayback();
+      startPlayback();
+    }
+  });
+  abCheckbox.addEventListener("change", () => {
+    if (abCheckbox.checked) state.abFrames = [state.currentIndex, Math.min(state.frames.length - 1, state.currentIndex + 1)];
+  });
+
+  // ---------------------------------------------------------------------
+  // View mode (Phase 3: difference / sum, alongside the default blink)
+  // ---------------------------------------------------------------------
+  function setPlaybackControlsEnabled(enabled) {
+    [stepBackBtn, playBtn, stepFwdBtn, speedSlider, loopCheckbox, abCheckbox, frameSlider].forEach((el) => {
+      el.disabled = !enabled;
+    });
+  }
+
+  viewModeSelect.addEventListener("change", () => {
+    const isDiff = viewModeSelect.value === "difference";
+    const isBlink = viewModeSelect.value === "blink";
+    abPick.hidden = !isDiff;
+    setPlaybackControlsEnabled(isBlink);
+    if (!isBlink) stopPlayback();
+    renderView();
+  });
+  diffASlider.addEventListener("input", renderView);
+  diffBSlider.addEventListener("input", renderView);
+
+  document.addEventListener("keydown", (ev) => {
+    if (document.activeElement === positionInput) return;
+    if (ev.key === " ") {
+      ev.preventDefault();
+      state.playing ? stopPlayback() : startPlayback();
+    } else if (ev.key === "ArrowRight") {
+      stopPlayback();
+      showFrame(Math.min(state.frames.length - 1, state.currentIndex + 1));
+    } else if (ev.key === "ArrowLeft") {
+      stopPlayback();
+      showFrame(Math.max(0, state.currentIndex - 1));
+    }
+  });
+
+  // ---------------------------------------------------------------------
+  // Init
+  // ---------------------------------------------------------------------
+  (async function init() {
+    await window.SpherexCache.requestPersistence();
+    updateCacheStatus();
+
+    const urlState = readUrlState();
+    fovSlider.value = urlState.fov;
+    fovValue.textContent = `${urlState.fov}′`;
+    fovWarning.hidden = urlState.fov <= 15;
+    modeSelect.value = urlState.mode;
+    setDetectors(urlState.detectors);
+    const qualityIdx = QUALITY_LEVELS.indexOf(urlState.quality);
+    qualitySlider.value = qualityIdx >= 0 ? qualityIdx : 1;
+    qualityValue.textContent = QUALITY_LABELS[parseInt(qualitySlider.value, 10)];
+    if (urlState.position) {
+      positionInput.value = urlState.position;
+      runSearch();
+    }
+  })();
+})();
