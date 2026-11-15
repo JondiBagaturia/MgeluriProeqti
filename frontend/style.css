@@ -552,6 +552,30 @@ body.show-all #progress-wrap {
   background: linear-gradient(#4a5cc0, var(--bar-blue) 55%, #27347c);
   transition: width 0.25s ease;
 }
+/* Stop (while a search is loading) / Start again (after it was stopped):
+   a cell at the right end of the bar. */
+#progress-wrap.has-action {
+  width: min(560px, calc(100vw - 32px));
+  padding-right: 116px;
+}
+#progress-action {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 1;
+  min-width: 104px;
+  padding: 0 12px 1px;
+  background: #000;
+  color: var(--ink);
+  border: none;
+  border-left: 1px solid var(--frame-hi);
+  border-radius: 0;
+  font: inherit;
+  font-size: 14.5px;
+}
+#progress-action:hover { color: var(--ink-bright); background: #17130b; }
+#progress-action:active { color: var(--active); }
 #progress-text {
   position: relative;
   font-size: 14.5px;

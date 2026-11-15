@@ -45,6 +45,7 @@
   const progressWrap = $("progress-wrap");
   const progressBar = $("progress-bar");
   const progressText = $("progress-text");
+  const progressAction = $("progress-action");
   const canvas = $("viewer-canvas");
   const canvasCtx = canvas.getContext("2d");
   const frameLabel = $("frame-label");
@@ -106,6 +107,9 @@
     globalFiniteValues: null, // flat array across ALL loaded frames, for Asinh's fixed levels
     searchGeneration: 0, // bumped by every new search; stale streams/retries check it and stop
     retryTimer: null, // countdown to the next automatic attempt while the archive is down
+    loading: "idle", // "busy" from Go until the search ends, "stopped" after Stop, else "idle"
+    abort: null, // AbortController of the search in flight (its resolve + frame requests)
+    pillTimer: null, // pending "hide the progress bar" timeout
   };
 
   // ---------------------------------------------------------------------
@@ -405,7 +409,14 @@
     }
 
     cancelRetry();
+    if (state.abort) state.abort.abort(); // a search still in flight is replaced by this one
+    const controller = new AbortController();
+    state.abort = controller;
     const generation = ++state.searchGeneration; // invalidates any earlier stream or pending retry
+    setLoading("busy");
+    progressWrap.hidden = false;
+    progressBar.style.width = "0%";
+    progressText.textContent = "Resolving the position…";
     stopPlayback();
     state.frames = [];
     state.allFrames = [];
@@ -427,17 +438,21 @@
 
     let resolved;
     try {
-      const resp = await fetch(`${API_BASE}/api/resolve?position=${encodeURIComponent(position)}`);
+      const resp = await fetch(`${API_BASE}/api/resolve?position=${encodeURIComponent(position)}`, { signal: controller.signal });
       if (!resp.ok) {
         const err = await resp.json().catch(() => ({ detail: resp.statusText }));
         throw new Error(err.detail || resp.statusText);
       }
       resolved = await resp.json();
     } catch (e) {
+      if (generation !== state.searchGeneration) return; // stopped, or replaced by a newer search
       resolveStatus.textContent = `Could not resolve: ${e.message}`;
       resolveStatus.className = "status-text error";
+      progressWrap.hidden = true;
+      setLoading("idle");
       return;
     }
+    if (generation !== state.searchGeneration) return;
 
     state.resolvedCoord = { ra: resolved.ra_deg, dec: resolved.dec_deg };
     state.resolved = resolved;
@@ -459,6 +474,7 @@
 
     if (state.releaseTag === "unknown") {
       state.releaseTag = await fetchReleaseTag();
+      if (generation !== state.searchGeneration) return;
     }
 
     const cacheKey = window.SpherexCache.makeKey({
@@ -470,19 +486,19 @@
       detector: detectors.slice().sort().join(""),
     });
 
-    progressWrap.hidden = false;
-    progressBar.style.width = "0%";
     progressText.textContent = "Checking local cache…";
 
     const cached = await window.SpherexCache.get(cacheKey);
+    if (generation !== state.searchGeneration) return;
     if (cached && cached.length) {
+      setLoading("idle");
       const cachedAnalysis = cached.find((c) => c && c.__analysis);
       state.analysis = cachedAnalysis ? cachedAnalysis.__analysis : null;
       state.allFrames = cached.filter((c) => !(c && c.__analysis)).map(reviveFrame);
       applyDetectorFilter(false);
       progressText.textContent = `Loaded ${state.allFrames.length} frame(s) from local cache`;
       progressBar.style.width = "100%";
-      setTimeout(() => (progressWrap.hidden = true), 1500);
+      hideProgressLater(1500);
       return; // cache hit: no network call for pixels at all
     }
 
@@ -491,13 +507,60 @@
   }
 
   // ---------------------------------------------------------------------
+  // Stop / Start again
+  //
+  // A search can take minutes when IRSA is slow. While one is in flight
+  // (resolving, downloading, retrying, or waiting for the source analysis)
+  // the progress bar carries a Stop button: it abandons the search - the
+  // browser cancels its requests, and the server then drops the downloads
+  // it has not started (backend/app/irsa.py, fetch_cutouts). Frames that
+  // already arrived stay on screen. The button then reads "Start again",
+  // which runs the search in the form afresh (so does Go).
+  // ---------------------------------------------------------------------
+  function setLoading(phase) {
+    state.loading = phase;
+    progressAction.hidden = phase === "idle";
+    progressAction.textContent = phase === "stopped" ? "Start again" : "Stop";
+    progressWrap.classList.toggle("has-action", phase !== "idle");
+    if (phase !== "idle") {
+      clearTimeout(state.pillTimer); // a "hide" left over from the previous search
+      state.pillTimer = null;
+    }
+  }
+
+  function hideProgressLater(ms) {
+    clearTimeout(state.pillTimer);
+    state.pillTimer = setTimeout(() => {
+      state.pillTimer = null;
+      if (state.loading === "idle") progressWrap.hidden = true;
+    }, ms);
+  }
+
+  function stopLoading() {
+    cancelRetry();
+    state.searchGeneration++; // whatever is still running now belongs to a dead search
+    if (state.abort) state.abort.abort();
+    state.abort = null;
+    emptyState.hidden = true;
+    progressWrap.hidden = false;
+    progressText.textContent = state.allFrames.length ? `Stopped: ${state.allFrames.length} frame(s) loaded` : "Stopped";
+    setLoading("stopped");
+    renderAnalysis();
+  }
+
+  progressAction.addEventListener("click", () => {
+    if (state.loading === "busy") stopLoading();
+    else runSearch();
+  });
+
+  // ---------------------------------------------------------------------
   // Automatic retry while the archive is down
   //
   // IRSA's search service drops out for a while at a time (the server then
   // reports e.g. "SIA query failed: 502 Proxy Error"). A search that ended
   // with an archive error and no frames is repeated quietly: the progress
-  // pill stays up as if the first attempt were still running, and nothing
-  // else appears on screen. Only when every retry has failed does a
+  // pill stays up, noting which attempt this is, and nothing else appears
+  // on screen. Only when every retry has failed does a
   // message come up, with a button to start over. A new search cancels it.
   // ---------------------------------------------------------------------
   const RETRY_DELAYS_S = [3, 5, 8, 12, 15]; // pause before each automatic retry
@@ -510,15 +573,19 @@
     }
   }
 
-  function showFetchProgress() {
+  function showFetchProgress(attempt) {
     emptyState.hidden = true;
     progressWrap.hidden = false;
     progressBar.style.width = "0%";
-    progressText.textContent = "Fetching from IRSA…";
+    // From the second attempt on the bar says so: a slow archive should not
+    // look like a frozen page. Still no pop-up, and Stop is right there.
+    progressText.textContent =
+      attempt > 1 ? `Fetching from IRSA… the archive is slow to answer (attempt ${attempt} of ${MAX_AUTO_RETRIES + 1})` : "Fetching from IRSA…";
   }
 
   function showArchiveFailure(request, generation, errorText) {
     progressWrap.hidden = true;
+    setLoading("idle");
     emptyState.textContent = "";
     const message = document.createElement("span");
     message.textContent =
@@ -529,7 +596,8 @@
     againBtn.textContent = "Try again";
     againBtn.addEventListener("click", () => {
       if (generation !== state.searchGeneration) return;
-      showFetchProgress();
+      setLoading("busy");
+      showFetchProgress(1);
       streamFrames(request, generation, 1);
     });
     emptyState.append(message, againBtn);
@@ -543,7 +611,7 @@
       showArchiveFailure(request, generation, errorText);
       return;
     }
-    showFetchProgress(); // same pill as the first attempt: the wait is not announced
+    showFetchProgress(attempt + 1); // same pill as the first attempt, with a note that it is a retry
     state.retryTimer = setTimeout(() => {
       state.retryTimer = null;
       if (generation !== state.searchGeneration) return;
@@ -564,13 +632,17 @@
       // before it knows how the stream will end, so without this a failed
       // attempt (IRSA down) is replayed from the browser's HTTP cache on
       // every retry. Successful sets are cached in IndexedDB instead.
-      resp = await fetch(url, { cache: "no-store" });
+      resp = await fetch(url, { cache: "no-store", signal: state.abort ? state.abort.signal : undefined });
     } catch (e) {
+      if (generation !== state.searchGeneration) return; // stopped, or replaced by a newer search
       progressText.textContent = `Network error: ${e.message}`;
+      setLoading("idle");
       return;
     }
+    if (generation !== state.searchGeneration) return;
     if (!resp.ok || !resp.body) {
       progressText.textContent = `Server error (${resp.status})`;
+      setLoading("idle");
       return;
     }
 
@@ -606,9 +678,17 @@
     let streamError = null; // last {"error": ...} line the server sent, if any
 
     while (true) {
-      const { value, done } = await reader.read();
+      let value, done;
+      try {
+        ({ value, done } = await reader.read());
+      } catch (e) {
+        // Stop pressed (the request was aborted) or the connection dropped.
+        if (generation !== state.searchGeneration) return;
+        streamError = `connection to the server was lost (${e.message})`;
+        break;
+      }
       if (generation !== state.searchGeneration) {
-        reader.cancel().catch(() => {}); // a newer search has started; drop this one
+        reader.cancel().catch(() => {}); // stopped, or a newer search has started; drop this one
         return;
       }
       if (done) break;
@@ -686,10 +766,12 @@
         return;
       }
       progressWrap.hidden = true;
+      setLoading("idle");
       emptyState.hidden = false;
       emptyState.textContent = "No SPHEREx images found at this position/FOV/detector selection.";
       return;
     }
+    setLoading("idle");
     if (streamError) {
       // Keep the error visible: an unreachable archive is not an empty sky.
       progressText.textContent = `Stopped with an error after ${state.allFrames.length} frame(s): ${streamError.slice(0, 160)}`;
@@ -697,7 +779,7 @@
       return; // never cache an incomplete result
     }
     progressText.textContent = `Done: ${state.allFrames.length} frame(s)`;
-    setTimeout(() => (progressWrap.hidden = true), 2000);
+    hideProgressLater(2000);
 
     // Cache the whole set now that the stream is complete.
     const serializable = state.allFrames.map(({ gapFilled, ...f }) => ({ ...f, data: f.data.buffer.slice(0) }));
@@ -1325,9 +1407,11 @@
     sourcesBtn.textContent = shownSeries ? `Sources (${shownSeries.tracks.length})` : "Sources";
     exportJsonBtn.disabled = exportCsvBtn.disabled = !a;
     if (!a) {
-      analysisStatus.textContent = state.allFrames.length
-        ? "Analysis runs after the last frame arrives…"
-        : "";
+      analysisStatus.textContent = !state.allFrames.length
+        ? ""
+        : state.loading === "busy"
+          ? "Analysis runs after the last frame arrives…"
+          : "No source analysis for this search: loading was stopped or ended with an error. Start it again to get one.";
       return;
     }
     if (a.error) {

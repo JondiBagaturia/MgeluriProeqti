@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -145,6 +146,41 @@ async def images(
     return JSONResponse(result, headers={"Cache-Control": "public, max-age=300"})
 
 
+class _ClosingStreamingResponse(StreamingResponse):
+    """A StreamingResponse over a plain generator that closes the generator
+    the moment the response ends - finished, or abandoned because the client
+    went away (Stop pressed in the page, tab closed).
+
+    Starlette stops iterating on a disconnect but leaves the generator
+    suspended until it is garbage collected, which in practice was only after
+    every image had been downloaded anyway. Closing it is what lets
+    app/irsa.fetch_cutouts drop the downloads it has not started."""
+
+    def __init__(self, content, **kwargs):
+        super().__init__(content, **kwargs)
+        self._generator = content
+
+    async def __call__(self, scope, receive, send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            # Off the event loop: closing waits for the downloads already in
+            # flight. A no-op when the stream simply finished.
+            threading.Thread(target=_close_when_idle, args=(self._generator,), daemon=True).start()
+
+
+def _close_when_idle(gen) -> None:
+    """Close a plain generator from a helper thread. If another thread is
+    inside next() on it right now, wait until that call returns: a generator
+    cannot be closed while it is executing."""
+    while True:
+        try:
+            gen.close()
+            return
+        except ValueError:  # "generator already executing"
+            time.sleep(0.2)
+
+
 @app.get("/api/frames")
 async def frames(
     position: str = Query(...),
@@ -212,7 +248,7 @@ async def frames(
             log.exception("frame stream failed")
             yield (json.dumps({"error": f"Processing failed: {type(exc).__name__}: {exc}"}) + "\n").encode("utf-8")
 
-    return StreamingResponse(
+    return _ClosingStreamingResponse(
         generate(),
         media_type="application/x-ndjson",
         # no-store: the stream can carry a transient failure (a catalogue 502, a

@@ -53,6 +53,39 @@ class DiscoveryError(Exception):
 # Pauses between attempts of one SIA query (so 3 attempts in ~6s at most).
 _SIA_RETRY_SLEEPS_S = (2, 4)
 
+# astroquery / pyvo send the search requests without a read timeout. When
+# IRSA accepts the connection and then never answers (seen 2026-11-15, in
+# between its 502/503 spells), the call blocks for good and the page sits on
+# "Fetching from IRSA..." forever. These bound it: one attempt, and the whole
+# search including its retries. A normal answer takes 3-25 s.
+_SIA_ATTEMPT_TIMEOUT_S = 40.0
+_SIA_TOTAL_BUDGET_S = 75.0
+_COLLECTIONS_TIMEOUT_S = 15.0
+
+
+def _call_with_timeout(fn, timeout_s: float, what: str):
+    """Run `fn()` in a helper thread and give up waiting after `timeout_s`.
+
+    The helper thread cannot be interrupted: if it is stuck on a dead
+    connection it stays behind (daemon, idle) until the socket closes. That
+    is the price of not hanging the request it was serving."""
+    box: dict = {}
+
+    def run():
+        try:
+            box["value"] = fn()
+        except BaseException as exc:  # noqa: BLE001 - handed to the caller below
+            box["error"] = exc
+
+    worker = threading.Thread(target=run, daemon=True, name=f"irsa-{what}")
+    worker.start()
+    worker.join(timeout_s)
+    if worker.is_alive():
+        raise TimeoutError(f"IRSA did not answer the {what} within {timeout_s:.0f} s")
+    if "error" in box:
+        raise box["error"]
+    return box["value"]
+
 
 @dataclass
 class ImageRecord:
@@ -71,7 +104,9 @@ def discover_collections() -> list[str]:
     if the discovery call itself raises."""
     cfg = get_config()
     try:
-        rows = Irsa.list_collections(servicetype="SIA")
+        rows = _call_with_timeout(
+            lambda: Irsa.list_collections(servicetype="SIA"), _COLLECTIONS_TIMEOUT_S, "collection list"
+        )
         names = [str(r["collection"]) for r in rows]
     except Exception as exc:  # noqa: BLE001
         log.warning("SIA collection discovery failed (%s); using fallback list", exc)
@@ -101,12 +136,18 @@ def find_images(coord: SkyCoord, fov_arcmin: float, detectors: Optional[list[str
     # outage that outlasts them is reported to the browser, which keeps
     # retrying on a slower, visible schedule (frontend/app.js).
     rows = None
+    deadline = time.monotonic() + _SIA_TOTAL_BUDGET_S
     for attempt in range(len(_SIA_RETRY_SLEEPS_S) + 1):
         try:
-            rows = Irsa.query_sia(pos=(coord, radius), collection=collections)
+            rows = _call_with_timeout(
+                lambda: Irsa.query_sia(pos=(coord, radius), collection=collections),
+                max(5.0, min(_SIA_ATTEMPT_TIMEOUT_S, deadline - time.monotonic())),
+                "image search",
+            )
             break
         except Exception as exc:  # noqa: BLE001
-            if attempt == len(_SIA_RETRY_SLEEPS_S):
+            out_of_time = time.monotonic() + _SIA_RETRY_SLEEPS_S[min(attempt, len(_SIA_RETRY_SLEEPS_S) - 1)] + 5.0 > deadline
+            if attempt == len(_SIA_RETRY_SLEEPS_S) or out_of_time:
                 raise DiscoveryError(f"SIA query failed: {exc}") from exc
             log.warning("SIA query failed (attempt %d), retrying in %ds: %s", attempt + 1, _SIA_RETRY_SLEEPS_S[attempt], exc)
             time.sleep(_SIA_RETRY_SLEEPS_S[attempt])
@@ -163,12 +204,23 @@ class _RetryableHTTPStatus(Exception):
     something that was never going to succeed."""
 
 
-def _fetch_one(record: ImageRecord, coord: SkyCoord, fov_arcmin: float, session: requests.Session) -> Cutout:
+def _fetch_one(
+    record: ImageRecord,
+    coord: SkyCoord,
+    fov_arcmin: float,
+    session: requests.Session,
+    cancelled: Optional[threading.Event] = None,
+) -> Cutout:
     cfg = get_config().fetch
     url = _cutout_url(record, coord, fov_arcmin)
     last_exc: Optional[Exception] = None
 
     for attempt in range(cfg.max_retries + 1):
+        # Set by fetch_cutouts when its caller stopped listening (the user
+        # pressed Stop, or closed the page): don't start or retry a download
+        # nobody will use.
+        if cancelled is not None and cancelled.is_set():
+            raise DiscoveryError(f"Cutout fetch cancelled: {url}")
         try:
             t0 = time.time()
             with _global_fetch_semaphore:
@@ -195,7 +247,10 @@ def _fetch_one(record: ImageRecord, coord: SkyCoord, fov_arcmin: float, session:
             if attempt < cfg.max_retries:
                 sleep_s = cfg.backoff_base_s * (2 ** attempt) + random.uniform(0, 0.5)
                 log.debug("cutout fetch retry %d/%d for %s: %s", attempt + 1, cfg.max_retries, url, exc)
-                time.sleep(sleep_s)
+                if cancelled is not None:
+                    cancelled.wait(sleep_s)  # a sleep that a cancel cuts short
+                else:
+                    time.sleep(sleep_s)
             continue
         except requests.HTTPError as exc:
             # A real client/server error (e.g. 422) - retrying with the same
@@ -222,20 +277,34 @@ def fetch_cutouts(records: list[ImageRecord], coord: SkyCoord, fov_arcmin: float
     A download that fails after its retries is skipped. With
     `yield_failures=True` a FetchFailure is yielded in its place, so a
     caller counting progress can tell "still downloading" from "gave up".
+
+    If the caller stops iterating early (the browser cancelled the request
+    or went away, which closes this generator), downloads that have not
+    started are dropped and running ones stop retrying - IRSA is not asked
+    for images nobody is waiting for.
     """
     cfg = get_config().fetch
     session = requests.Session()
+    cancelled = threading.Event()
     with ThreadPoolExecutor(max_workers=cfg.max_workers) as pool:
         futures = {
-            pool.submit(_fetch_one, record, coord, fov_arcmin, session): record
+            pool.submit(_fetch_one, record, coord, fov_arcmin, session, cancelled): record
             for record in records
         }
-        for future in as_completed(futures):
-            record = futures[future]
-            try:
-                yield future.result()
-            except Exception as exc:  # noqa: BLE001
-                log.warning("Skipping %s after fetch failure: %s", record.obs_id, exc)
-                if yield_failures:
-                    yield FetchFailure(record=record, error=str(exc))
-                continue
+        try:
+            for future in as_completed(futures):
+                record = futures[future]
+                try:
+                    yield future.result()
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("Skipping %s after fetch failure: %s", record.obs_id, exc)
+                    if yield_failures:
+                        yield FetchFailure(record=record, error=str(exc))
+                    continue
+        finally:
+            # Normal end: everything is done and this is a no-op. Early end
+            # (generator closed): cancel what has not started, and flag the
+            # rest so they give up at their next retry.
+            cancelled.set()
+            for future in futures:
+                future.cancel()

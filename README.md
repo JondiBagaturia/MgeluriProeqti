@@ -120,6 +120,9 @@ sidebar, is on the `main` and `phase2-discovery-pipeline` branches.)
   one it says the source analysis is running.
 - If the IRSA archive is not answering, the page quietly retries up to 5
   times before it reports the problem.
+- **Stop**, at the right end of that bar, abandons a search that is taking
+  too long (frames already loaded stay on screen, and the server stops
+  asking IRSA for the rest); the button then reads **Start again**.
 
 To change the look: the colours and frame styles are the variables at the
 top of `frontend/style.css` (`:root { --ink: ...; --frame: ...}`), and the
