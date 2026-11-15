@@ -23,6 +23,11 @@
 > on cached real cutouts of the five targets. Sections below that describe
 > nearest-neighbour resampling, a stateless backend, or "What doesn't (yet)"
 > are the pre-Phase-Two record.
+>
+> **Phase Three:** spectro-temporal analysis F(λ, t), meaning per-exposure flux at each
+> exposure's own wavelength and time, with spectra by epoch, light curves per detector and
+> separate change statistics. See [docs/PHASE3.md](docs/PHASE3.md). In the app, tick
+> "Spectro-temporal analysis"; in the API, add `spectrotemporal=true` to `/api/frames`.
 
 A public web tool to blink NASA SPHEREx epochs at any sky position, so moving
 or variable objects pop out visually — the same idea volunteers used on

@@ -283,3 +283,10 @@ button#clear-cache-btn {
 .badge-dim { background: rgba(139, 150, 171, 0.2); color: var(--text-dim); }
 .uncertainty-box { margin: 6px 0 8px; padding: 6px 8px; border-left: 3px solid var(--warn); background: rgba(255, 180, 84, 0.06); font-size: 12px; }
 .uncertainty-box ul { margin: 4px 0 0 16px; padding: 0; }
+
+/* ---- Spectro-temporal panel ---- */
+#st-panel h3 { font-size: 13px; margin: 12px 0 4px; }
+#st-panel canvas { width: 100%; max-width: 900px; height: auto; background: rgba(255, 255, 255, 0.02); }
+.st-epoch-boxes { display: flex; flex-wrap: wrap; gap: 12px; font-size: 12px; margin: 4px 0; }
+.st-metric { border-left: 3px solid var(--panel-border); padding: 2px 8px; margin: 6px 0; font-size: 13px; }
+.st-metric p { margin: 2px 0; }

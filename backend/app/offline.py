@@ -58,6 +58,7 @@ def run_cached(
     root: Path = REAL_DATA_DIR,
     use_catalogs: bool = False,
     shiftstack: bool = False,
+    spectrotemporal: bool = False,
 ) -> CachedRun:
     """`use_catalogs=False` (the default, for offline tests) skips the Gaia /
     CatWISE queries: every track then reports catalog_unavailable."""
@@ -89,7 +90,7 @@ def run_cached(
     try:
         for item in stream_frames(resolved, manifest["fov_arcmin"], detectors, mode, analyze=analyze,
                                   records_override=records, cutout_source=source, exposure_sink=run.exposures,
-                                  shiftstack=shiftstack):
+                                  shiftstack=shiftstack, spectrotemporal=spectrotemporal):
             if isinstance(item, dict):
                 run.analysis = item
             elif isinstance(item, EncodedFrame):
@@ -97,6 +98,10 @@ def run_cached(
     finally:
         stream_mod.gaia_sources, stream_mod.catwise_sources = saved
     run.frames.sort(key=lambda m: ("+".join(m["detectors"]), m["time_mjd_mean"]))
+    if run.analysis and "spectrotemporal" in run.analysis:
+        # Exposures that could not be downloaded when the cache was built.
+        run.analysis["spectrotemporal"]["retrieval_failed_at_caching"] = (
+            manifest.get("n_requested", 0) - manifest.get("n_cached", 0))
     return run
 
 

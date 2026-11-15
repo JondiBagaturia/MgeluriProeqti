@@ -27,6 +27,7 @@
   const qualitySlider = $("quality-slider");
   const qualityValue = $("quality-value");
   const shiftstackCheckbox = $("shiftstack-checkbox");
+  const stCheckbox = $("st-checkbox");
   const QUALITY_LEVELS = ["low", "mid", "high"];
   const QUALITY_LABELS = ["Low (fastest)", "Mid (balanced)", "High (full quality)"];
   const stretchSelect = $("stretch-select");
@@ -70,7 +71,7 @@
   const detectorViewSelect = $("detector-view-select");
   // Bump when the frame wire format changes, so stale IndexedDB entries
   // (e.g. frames without grid WCS / photometry) are never revived.
-  const FRAME_SCHEMA = "v4";
+  const FRAME_SCHEMA = "v5";
   // Click within this distance of the predicted target position -> spectrum
   // follows the target's proper motion per exposure (2 native pixels).
   const TRACK_CLICK_RADIUS_ARCSEC = 12.3;
@@ -145,10 +146,11 @@
       mode: params.get("mode") || "detector_epoch",
       quality: QUALITY_LEVELS.includes(quality) ? quality : "mid",
       shiftstack: params.get("shiftstack") === "1",
+      spectrotemporal: params.get("st") === "1",
     };
   }
 
-  function writeUrlState({ position, fov, detectors, mode, quality, shiftstack }) {
+  function writeUrlState({ position, fov, detectors, mode, quality, shiftstack, spectrotemporal }) {
     const params = new URLSearchParams();
     params.set("position", position);
     params.set("fov", fov);
@@ -156,6 +158,7 @@
     params.set("mode", mode);
     params.set("quality", quality);
     if (shiftstack) params.set("shiftstack", "1");
+    if (spectrotemporal) params.set("st", "1");
     const url = `${location.pathname}?${params.toString()}`;
     history.replaceState(null, "", url);
     const fullUrl = location.origin + url;
@@ -237,6 +240,7 @@
     const mode = modeSelect.value;
     const quality = QUALITY_LEVELS[parseInt(qualitySlider.value, 10)];
     const shiftstack = shiftstackCheckbox.checked;
+    const spectrotemporal = stCheckbox.checked;
 
     if (detectors.length === 0) {
       resolveStatus.textContent = "Pick at least one detector.";
@@ -291,7 +295,7 @@
     resolveStatus.textContent = statusMsg;
     resolveStatus.className = "status-text";
 
-    writeUrlState({ position, fov, detectors, mode, quality, shiftstack });
+    writeUrlState({ position, fov, detectors, mode, quality, shiftstack, spectrotemporal });
 
     if (state.releaseTag === "unknown") {
       state.releaseTag = await fetchReleaseTag();
@@ -302,7 +306,7 @@
       ra: resolved.ra_deg,
       dec: resolved.dec_deg,
       fov,
-      group: `${FRAME_SCHEMA}:${mode}:${quality}:ss${shiftstack ? 1 : 0}`, // quality changes the actual pixel content, so it must be part of the key
+      group: `${FRAME_SCHEMA}:${mode}:${quality}:ss${shiftstack ? 1 : 0}:st${spectrotemporal ? 1 : 0}`, // quality changes the actual pixel content, so it must be part of the key
       detector: detectors.slice().sort().join(""),
     });
 
@@ -323,15 +327,15 @@
     }
 
     progressText.textContent = "Fetching from IRSA…";
-    streamFrames(position, fov, detectors, mode, quality, cacheKey, shiftstack);
+    streamFrames(position, fov, detectors, mode, quality, cacheKey, shiftstack, spectrotemporal);
   }
 
   function reviveFrame(stored) {
     return { ...stored, data: new Uint16Array(stored.data), gapFilled: new Set(stored.gapFilledIndices || []) };
   }
 
-  async function streamFrames(position, fov, detectors, mode, quality, cacheKey, shiftstack) {
-    const url = `${API_BASE}/api/frames?position=${encodeURIComponent(position)}&fov=${fov}&detectors=${detectors.join(",")}&group=${mode}&quality=${quality}${shiftstack ? "&shiftstack=true" : ""}`;
+  async function streamFrames(position, fov, detectors, mode, quality, cacheKey, shiftstack, spectrotemporal) {
+    const url = `${API_BASE}/api/frames?position=${encodeURIComponent(position)}&fov=${fov}&detectors=${detectors.join(",")}&group=${mode}&quality=${quality}${shiftstack ? "&shiftstack=true" : ""}${spectrotemporal ? "&spectrotemporal=true" : ""}`;
     let resp;
     try {
       resp = await fetch(url);
@@ -1148,6 +1152,7 @@
     }
     renderAnalysisDetail();
     renderShiftStackPanel();
+    renderSpectroTemporal();
   }
 
   function renderAnalysisDetail() {
@@ -1569,6 +1574,338 @@
   }
 
   // ---------------------------------------------------------------------
+  // Spectro-temporal analysis F(lambda, t) (app/spectrotemporal.py).
+  // Shows measured values only: no line is drawn through sparse points,
+  // gaps in wavelength coverage stay visible, and points from different
+  // epochs are never presented as one simultaneous spectrum.
+  // ---------------------------------------------------------------------
+  const stPanel = $("st-panel");
+  const stSourceSelect = $("st-source-select");
+  const stSedCanvas = $("st-sed-canvas");
+  const stLcCanvas = $("st-lc-canvas");
+  const stEpochBoxes = $("st-epoch-boxes");
+  const stHover = $("st-hover");
+  const stCoverage = $("st-coverage");
+  const stMetrics = $("st-metrics");
+  const stTableBody = $("st-table-body");
+  const stStatus = $("st-status");
+  const stBody = $("st-body");
+  const EPOCH_COLORS = ["#5fb0ff", "#ffb454", "#7CFC9A", "#ff6b9d", "#c7a6ff", "#f2e35f"];
+  const STATE_TEXT = {
+    valid: "valid",
+    valid_flagged: "valid, saturation-related flag in aperture",
+    below_threshold: "below 3σ (upper limit)",
+    saturated: "saturated (no flux)",
+    masked: "masked (no flux)",
+    off_image: "off image (no flux)",
+    no_background: "no sky estimate (no flux)",
+  };
+  const ASSESS = {
+    significant_change: ["Significant change", "badge-ok"],
+    conditional: ["Conditional", "badge-warn"],
+    not_unusual: ["Not unusual for this field", "badge-dim"],
+    no_significant_change: ["No significant change", "badge-dim"],
+    inconclusive: ["Inconclusive", "badge-dim"],
+  };
+  const METRIC_TEXT = {
+    grey_variability: ["Brightness change at λ₀", "Δχ² between a fit with one flux per epoch and a constant flux, both with one spectral shape shared by all epochs (dof = epochs − 1)."],
+    slope_change: ["Spectral slope change", "Δχ² for adding a per-epoch tilt (1 + t_e(λ − λ₀)) to the shared shape (dof = epochs − 1)."],
+    matched_wavelength_pairs: ["Same-wavelength pairs (model-free)", "Exposures from different epochs within ¼ bandwidth of each other; χ² of their differences."],
+    colour_change: ["Colour change between detectors", "χ² of a constant ln(F_A(λ₀)/F_B(λ₀)) across epochs."],
+  };
+  const st = { selectedEpochs: null, hoverPoints: [] };
+
+  function stData() {
+    return state.analysis && state.analysis.spectrotemporal ? state.analysis.spectrotemporal : null;
+  }
+  function stSource() {
+    const d = stData();
+    if (!d || !d.sources) return null;
+    return d.sources.find((s) => s.id === stSourceSelect.value) || d.sources[0] || null;
+  }
+
+  function renderSpectroTemporal() {
+    const d = stData();
+    stBody.hidden = true;
+    if (!state.analysis) {
+      stStatus.textContent = "";
+      return;
+    }
+    if (!d) {
+      stStatus.textContent = "Not requested for this search. Tick “Spectro-temporal analysis” and search again.";
+      return;
+    }
+    if (d.error) {
+      stStatus.textContent = `Spectro-temporal analysis failed: ${d.error}`;
+      return;
+    }
+    const prev = stSourceSelect.value;
+    stSourceSelect.innerHTML = "";
+    for (const s of d.sources) {
+      const o = document.createElement("option");
+      o.value = s.id;
+      o.textContent = `${s.kind === "target" ? "★ " : ""}${s.label}${s.is_reference_star ? " (reference star)" : ""}`;
+      stSourceSelect.appendChild(o);
+    }
+    if (d.sources.some((s) => s.id === prev)) stSourceSelect.value = prev;
+    const failed = Object.values(d.retrieval_failed_by_detector || {}).reduce((a, b) => a + b, 0) + (d.retrieval_failed_at_caching || 0);
+    stStatus.textContent =
+      `${d.n_exposures} exposure(s) measured on native pixels; ${failed} requested exposure(s) could not be retrieved. ` +
+      `${d.reference.n_stars} reference star(s) in this field. ${d.statement}`;
+    stBody.hidden = false;
+    renderStSource();
+  }
+
+  function renderStSource() {
+    const s = stSource();
+    if (!s) return;
+    const epochs = s.epochs || [];
+    if (!st.selectedEpochs || st.selectedEpochs.source !== s.id) {
+      st.selectedEpochs = { source: s.id, set: new Set(epochs.map((e) => e.index)) };
+    }
+    stEpochBoxes.innerHTML = "";
+    epochs.forEach((e, i) => {
+      const lab = document.createElement("label");
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = st.selectedEpochs.set.has(e.index);
+      cb.addEventListener("change", () => {
+        cb.checked ? st.selectedEpochs.set.add(e.index) : st.selectedEpochs.set.delete(e.index);
+        drawSed(s);
+      });
+      lab.appendChild(cb);
+      const sw = el("span", ` Epoch ${e.index + 1}: ${fmtDate(e.mjd_min)}…${fmtDate(e.mjd_max)} (${(e.mjd_max - e.mjd_min).toFixed(1)} d)`);
+      sw.style.color = EPOCH_COLORS[i % EPOCH_COLORS.length];
+      lab.appendChild(sw);
+      stEpochBoxes.appendChild(lab);
+    });
+    drawSed(s);
+    drawStLightCurves(s);
+    renderStCoverage(s);
+    renderStMetrics(s);
+    renderStTable(s);
+  }
+
+  /** SED: one panel per detector (broken wavelength axis, so the gap between
+   * detectors is never drawn as if observed), shared log or linear y. */
+  function drawSed(s) {
+    const ctx = stSedCanvas.getContext("2d");
+    const W = stSedCanvas.width, H = stSedCanvas.height;
+    ctx.clearRect(0, 0, W, H);
+    ctx.font = "11px sans-serif";
+    st.hoverPoints = [];
+    const ms = s.measurements;
+    const dets = s.detectors;
+    const shown = ms.filter((m) => st.selectedEpochs.set.has(m.epoch_index));
+    const vals = shown.filter((m) => m.flux_mjy != null && (m.state === "valid" || m.state === "valid_flagged"))
+      .map((m) => [m.flux_mjy - m.flux_err_mjy, m.flux_mjy + m.flux_err_mjy]).flat()
+      .concat(shown.filter((m) => m.state === "below_threshold").map((m) => m.upper_limit_mjy));
+    const pos = vals.filter((v) => v > 0);
+    const padL = 58, padB = 34, padT = 10, gap = 26;
+    if (!pos.length) {
+      ctx.fillStyle = "#8b96ab";
+      ctx.fillText("No valid flux in the selected epochs (see the measurement table for why).", padL, H / 2);
+    }
+    const lo = pos.length ? Math.min(...pos) : 1, hi = pos.length ? Math.max(...pos) : 10;
+    const useLog = hi / lo > 5;
+    const yMin = useLog ? lo / 1.5 : Math.min(0, lo - 0.1 * (hi - lo)), yMax = useLog ? hi * 1.5 : hi + 0.1 * (hi - lo);
+    const yOf = (f) => {
+      if (useLog) return padT + (1 - (Math.log10(Math.max(f, yMin)) - Math.log10(yMin)) / (Math.log10(yMax) - Math.log10(yMin))) * (H - padT - padB);
+      return padT + (1 - (f - yMin) / (yMax - yMin || 1)) * (H - padT - padB);
+    };
+    const panelW = (W - padL - 10 - gap * (dets.length - 1)) / Math.max(dets.length, 1);
+    ctx.fillStyle = "#8b96ab";
+    ctx.fillText(`${fmtFlux(yMax)}`, 4, padT + 8);
+    ctx.fillText(`${fmtFlux(yMin)}`, 4, H - padB);
+    ctx.save(); ctx.translate(12, H / 2 + 30); ctx.rotate(-Math.PI / 2);
+    ctx.fillText(`F_ν (mJy${useLog ? ", log" : ""})`, 0, 0); ctx.restore();
+    dets.forEach((det, k) => {
+      const dm = ms.filter((m) => m.detector === det && m.wavelength_um != null);
+      if (!dm.length) return;
+      const l0 = Math.min(...dm.map((m) => m.wavelength_um)) - 0.02, l1 = Math.max(...dm.map((m) => m.wavelength_um)) + 0.02;
+      const x0 = padL + k * (panelW + gap);
+      const xOf = (l) => x0 + ((l - l0) / (l1 - l0)) * panelW;
+      ctx.strokeStyle = "rgba(139,150,171,0.35)";
+      ctx.strokeRect(x0, padT, panelW, H - padT - padB);
+      ctx.fillStyle = "#8b96ab";
+      ctx.fillText(`${det}: ${l0.toFixed(2)}–${l1.toFixed(2)} µm`, x0 + 4, H - 4);
+      if (k > 0) ctx.fillText("//", x0 - gap / 2 - 5, H - padB + 4);
+      // per-epoch wavelength coverage bars (what was actually sampled)
+      s.epochs.forEach((e, i) => {
+        if (!st.selectedEpochs.set.has(e.index)) return;
+        const em = dm.filter((m) => m.epoch_index === e.index);
+        ctx.fillStyle = EPOCH_COLORS[i % EPOCH_COLORS.length];
+        for (const m of em) {
+          const bw = m.bandwidth_um || 0.04;
+          ctx.globalAlpha = 0.5;
+          ctx.fillRect(xOf(m.wavelength_um - bw / 2), H - padB + 4 + 4 * i, Math.max(1, xOf(m.wavelength_um + bw / 2) - xOf(m.wavelength_um - bw / 2)), 3);
+          ctx.globalAlpha = 1;
+        }
+      });
+      for (const m of dm) {
+        if (!st.selectedEpochs.set.has(m.epoch_index)) continue;
+        const i = s.epochs.findIndex((e) => e.index === m.epoch_index);
+        const col = EPOCH_COLORS[i % EPOCH_COLORS.length];
+        const x = xOf(m.wavelength_um);
+        let y;
+        if ((m.state === "valid" || m.state === "valid_flagged") && m.flux_mjy != null) {
+          y = yOf(m.flux_mjy);
+          ctx.strokeStyle = col; ctx.lineWidth = 1;
+          ctx.beginPath(); ctx.moveTo(x, yOf(m.flux_mjy - m.flux_err_mjy)); ctx.lineTo(x, yOf(m.flux_mjy + m.flux_err_mjy)); ctx.stroke();
+          ctx.beginPath(); ctx.arc(x, y, 3, 0, 2 * Math.PI);
+          if (m.state === "valid") { ctx.fillStyle = col; ctx.fill(); } else { ctx.stroke(); }   // hollow = flagged
+        } else if (m.state === "below_threshold") {
+          y = yOf(m.upper_limit_mjy);
+          ctx.strokeStyle = col; ctx.beginPath();
+          ctx.moveTo(x - 4, y); ctx.lineTo(x + 4, y); ctx.moveTo(x, y); ctx.lineTo(x, y + 12);
+          ctx.moveTo(x - 3, y + 8); ctx.lineTo(x, y + 12); ctx.lineTo(x + 3, y + 8); ctx.stroke();
+        } else {
+          y = H - padB - 6;                 // no flux: marked on the baseline, never given a value
+          ctx.strokeStyle = m.state === "saturated" ? "#ff6b6b" : "#777";
+          ctx.beginPath(); ctx.moveTo(x - 3, y - 3); ctx.lineTo(x + 3, y + 3); ctx.moveTo(x + 3, y - 3); ctx.lineTo(x - 3, y + 3); ctx.stroke();
+        }
+        st.hoverPoints.push({ x, y, m });
+      }
+    });
+  }
+
+  stSedCanvas.addEventListener("mousemove", (ev) => {
+    const r = stSedCanvas.getBoundingClientRect();
+    const x = ((ev.clientX - r.left) / r.width) * stSedCanvas.width, y = ((ev.clientY - r.top) / r.height) * stSedCanvas.height;
+    let best = null, bd = 10;
+    for (const p of st.hoverPoints) {
+      const dd = Math.hypot(p.x - x, p.y - y);
+      if (dd < bd) { bd = dd; best = p; }
+    }
+    stHover.textContent = best ? describeMeasurement(best.m) : "Hover a point to see its measurement.";
+  });
+
+  function describeMeasurement(m) {
+    const f = m.flux_mjy == null ? "no flux"
+      : m.state === "below_threshold" ? `< ${fmtFlux(m.upper_limit_mjy)} mJy (3σ upper limit; measured ${fmtFlux(m.flux_mjy)} ± ${fmtFlux(m.flux_err_mjy)})`
+      : `${fmtFlux(m.flux_mjy)} ± ${fmtFlux(m.flux_err_mjy)} mJy (S/N ${m.snr != null ? m.snr.toFixed(0) : "?"})`;
+    return `${m.detector} λ = ${m.wavelength_um != null ? m.wavelength_um.toFixed(3) : "?"} µm (bandwidth ${m.bandwidth_um != null ? m.bandwidth_um.toFixed(3) : "?"}), ` +
+      `${fmtDate(m.time_mjd)} (MJD ${m.time_mjd.toFixed(3)}), epoch ${m.epoch_index + 1}, ${m.obs_id}: ${f}; ${STATE_TEXT[m.state] || m.state}` +
+      `${m.flags_in_aperture.length ? `; flags in aperture: ${m.flags_in_aperture.join(", ")}` : ""}.`;
+  }
+
+  /** Per-detector light curves: every usable exposure (small points, at its own
+   * wavelength) and the shared-shape fit's flux at λ0 per epoch (large). */
+  function drawStLightCurves(s) {
+    const ctx = stLcCanvas.getContext("2d");
+    const W = stLcCanvas.width, H = stLcCanvas.height;
+    ctx.clearRect(0, 0, W, H);
+    ctx.font = "11px sans-serif";
+    const dets = s.detectors;
+    const ph = (H - 10) / Math.max(dets.length, 1);
+    const tAll = s.measurements.map((m) => m.time_mjd);
+    const t0 = Math.min(...tAll), t1 = Math.max(...tAll);
+    const padL = 58, padR = 10;
+    const xOf = (t) => padL + ((t - t0) / (t1 - t0 || 1)) * (W - padL - padR);
+    dets.forEach((det, k) => {
+      const top = 5 + k * ph, bot = top + ph - 18;
+      const fit = s.fits[det];
+      const use = s.measurements.filter((m) => m.detector === det && m.flux_mjy != null && (m.state === "valid" || m.state === "valid_flagged"));
+      ctx.strokeStyle = "rgba(139,150,171,0.35)"; ctx.strokeRect(padL, top, W - padL - padR, bot - top);
+      ctx.fillStyle = "#8b96ab";
+      if (!use.length) { ctx.fillText(`${det}: no valid flux in any epoch`, padL + 6, (top + bot) / 2); return; }
+      const vals = use.map((m) => m.flux_mjy).concat(fit ? fit.amplitudes_mjy.map((a, i) => a + fit.amplitude_errs_mjy[i]) : [])
+        .concat(fit ? fit.amplitudes_mjy.map((a, i) => a - fit.amplitude_errs_mjy[i]) : []);
+      const lo = Math.min(...vals), hi = Math.max(...vals), span = hi - lo || Math.abs(hi) || 1;
+      const yOf = (f) => bot - ((f - (lo - 0.08 * span)) / (1.16 * span)) * (bot - top);
+      ctx.fillText(`${fmtFlux(hi)}`, 4, top + 10); ctx.fillText(`${fmtFlux(lo)}`, 4, bot);
+      const lmin = Math.min(...use.map((m) => m.wavelength_um)), lmax = Math.max(...use.map((m) => m.wavelength_um));
+      for (const m of use) {
+        const hue = 200 - 160 * ((m.wavelength_um - lmin) / (lmax - lmin || 1));
+        ctx.fillStyle = `hsla(${hue},70%,60%,0.75)`;
+        ctx.beginPath(); ctx.arc(xOf(m.time_mjd), yOf(m.flux_mjy), 2.2, 0, 2 * Math.PI); ctx.fill();
+      }
+      let label = `${det}: small dots = single exposures (colour = wavelength ${lmin.toFixed(2)}–${lmax.toFixed(2)} µm)`;
+      if (fit) {
+        fit.epochs.forEach((e, i) => {
+          const ep = s.epochs.find((x) => x.index === e);
+          const x = xOf(ep.mjd_mean), a = fit.amplitudes_mjy[i], ea = fit.amplitude_errs_mjy[i];
+          ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 1.5;
+          ctx.beginPath(); ctx.moveTo(x, yOf(a - ea)); ctx.lineTo(x, yOf(a + ea)); ctx.stroke();
+          ctx.beginPath(); ctx.rect(x - 4, yOf(a) - 4, 8, 8);
+          if (fit.model_adequate) { ctx.fillStyle = "#ffffff"; ctx.fill(); } else { ctx.stroke(); }
+        });
+        label += `; squares = flux at λ₀ = ${fit.lambda0_um.toFixed(2)} µm per epoch (shared-shape fit${fit.model_adequate ? "" : ", model does NOT describe this source: hollow, not reliable"})`;
+      }
+      ctx.fillStyle = "#8b96ab"; ctx.fillText(label, padL + 4, bot + 13);
+    });
+  }
+
+  function renderStCoverage(s) {
+    stCoverage.innerHTML = "";
+    const tbl = el("table", null, "analysis-table");
+    const hr = el("tr");
+    ["Detector", "Epoch", "Usable / exposures", "Wavelengths sampled (usable)", "Measurement states"].forEach((h) => hr.appendChild(el("th", h)));
+    const thead = el("thead"); thead.appendChild(hr); tbl.appendChild(thead);
+    const tb = el("tbody");
+    for (const c of s.coverage) {
+      const tr = el("tr");
+      tr.appendChild(el("td", c.detector));
+      tr.appendChild(el("td", String(c.epoch + 1)));
+      tr.appendChild(el("td", `${c.n_usable} / ${c.n_exposures}`));
+      tr.appendChild(el("td", c.lambda_min_um == null ? "none" : `${c.lambda_min_um.toFixed(3)}–${c.lambda_max_um.toFixed(3)} µm (${c.n_usable} points; gaps between them are not observed)`));
+      tr.appendChild(el("td", Object.entries(c.states).map(([k, v]) => `${v} ${STATE_TEXT[k] || k}`).join(", ") || "—"));
+      tb.appendChild(tr);
+    }
+    tbl.appendChild(tb);
+    stCoverage.appendChild(tbl);
+  }
+
+  function renderStMetrics(s) {
+    stMetrics.innerHTML = "";
+    const main = s.metrics.filter((m) => m.data === "all_usable");
+    const alt = s.metrics.filter((m) => m.data === "unflagged_only");
+    for (const m of main) {
+      const box = el("div", null, "st-metric");
+      const [name, def] = METRIC_TEXT[m.metric] || [m.metric, ""];
+      const head = el("p");
+      const [bt, bc] = ASSESS[m.assessment] || [m.assessment, "badge-dim"];
+      head.appendChild(el("span", bt, `badge ${bc}`));
+      const where = m.detector || (m.detectors ? m.detectors.join("/") : "");
+      head.appendChild(document.createTextNode(` ${name} — ${where}`));
+      head.title = def;
+      box.appendChild(head);
+      const nums = [];
+      if (m.status === "ok") {
+        const stat = m.delta_chi2 != null ? `Δχ² = ${m.delta_chi2.toFixed(1)}` : `χ² = ${m.chi2.toFixed(1)}`;
+        nums.push(`${stat}, dof = ${m.dof}, p = ${m.p_value != null ? m.p_value.toExponential(1) : "—"}`);
+        if (m.amplitudes_mjy) nums.push(`flux at ${m.lambda0_um.toFixed(2)} µm per epoch: ${m.amplitudes_mjy.map((a, i) => `${fmtFlux(a)}±${fmtFlux(m.amplitude_errs_mjy[i])}`).join(", ")} mJy`);
+        if (m.fractional_range != null && m.metric === "grey_variability") nums.push(`range ${(100 * m.fractional_range).toFixed(0)} ± ${(100 * m.fractional_range_err).toFixed(0)}%`);
+        if (m.median_ratio_later_over_earlier != null) nums.push(`${m.n_pairs} pair(s); median ratio later/earlier ${m.median_ratio_later_over_earlier.toFixed(2)}`);
+        if (m.ratio) nums.push(`flux ratio per epoch ${m.ratio.map((r) => r.toFixed(2)).join(", ")} (max change ${(100 * (Math.exp(m.max_change) - 1)).toFixed(0)}%); ${Math.round(100 * (m.simultaneous_fraction || 0))}% of exposures are simultaneous dichroic pairs`);
+        if (m.tilts_per_um) nums.push(`tilt per epoch ${m.tilts_per_um.map((t, i) => `${t.toFixed(2)}±${m.tilt_errs_per_um[i].toFixed(2)}`).join(", ")} /µm (first epoch = 0)`);
+        nums.push(`systematic floor ${(100 * (m.sys_floor || 0.025)).toFixed(1)}% per exposure`);
+      }
+      box.appendChild(el("p", nums.join(" · "), "status-text"));
+      box.appendChild(el("p", m.assessment_text));
+      const a = alt.find((x) => x.metric === m.metric && (x.detector || "") === (m.detector || ""));
+      if (a) box.appendChild(el("p", `Without flagged measurements: ${a.status === "ok" ? `${(ASSESS[a.assessment] || [a.assessment])[0]} (p = ${a.p_value != null ? a.p_value.toExponential(1) : "—"})` : a.reason || "not testable"}.`, "status-text"));
+      box.appendChild(el("p", `Needs: ${m.requires || "—"}.`, "status-text"));
+      stMetrics.appendChild(box);
+    }
+  }
+
+  function renderStTable(s) {
+    stTableBody.innerHTML = "";
+    for (const m of s.measurements) {
+      const tr = el("tr");
+      [fmtDate(m.time_mjd), m.time_mjd.toFixed(4), String(m.epoch_index + 1), m.obs_id, m.detector,
+       m.wavelength_um != null ? m.wavelength_um.toFixed(4) : "—", m.bandwidth_um != null ? m.bandwidth_um.toFixed(4) : "—",
+       m.flux_mjy != null ? fmtFlux(m.flux_mjy) : "—", m.flux_err_mjy != null ? fmtFlux(m.flux_err_mjy) : "—",
+       m.snr != null ? m.snr.toFixed(1) : "—", m.upper_limit_mjy != null ? fmtFlux(m.upper_limit_mjy) : "—",
+       STATE_TEXT[m.state] || m.state, m.flags_in_aperture.join(", ") || "—"].forEach((v) => tr.appendChild(el("td", v)));
+      stTableBody.appendChild(tr);
+    }
+  }
+
+  stSourceSelect.addEventListener("change", renderStSource);
+
+  // ---------------------------------------------------------------------
   // Playback
   // ---------------------------------------------------------------------
   function stopPlayback() {
@@ -1695,6 +2032,7 @@
     qualitySlider.value = qualityIdx >= 0 ? qualityIdx : 1;
     qualityValue.textContent = QUALITY_LABELS[parseInt(qualitySlider.value, 10)];
     shiftstackCheckbox.checked = urlState.shiftstack;
+    stCheckbox.checked = urlState.spectrotemporal;
     if (urlState.position) {
       positionInput.value = urlState.position;
       runSearch();

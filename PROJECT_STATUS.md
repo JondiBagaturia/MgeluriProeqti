@@ -1,9 +1,10 @@
 # Project status — SPHEREx Discovery Lab
 
-Last updated: 2026-11-15. **Current phase: Phase Two complete (pending commit); Phase Three
-not started.**
+Last updated: 2026-11-15. **Current phase: Phase Three (spectro-temporal analysis)
+implemented, not yet committed.** Phase Two is committed on `phase2-discovery-pipeline`.
 
-Details: [docs/PHASE2.md](docs/PHASE2.md) (methods, validation, limitations),
+Details: [docs/PHASE3.md](docs/PHASE3.md) (spectro-temporal F(λ, t)),
+[docs/PHASE2.md](docs/PHASE2.md) (methods, validation, limitations),
 [docs/AUDIT.md](docs/AUDIT.md) (the original audit and its fixes), and
 [docs/DISCOVERY.md](docs/DISCOVERY.md) (the first discovery pipeline, partly superseded).
 
@@ -22,6 +23,12 @@ Details: [docs/PHASE2.md](docs/PHASE2.md) (methods, validation, limitations),
 - Optionally runs a shift-and-stack search for faint movers, with time-shuffled controls.
 - Shows a parallax-aware fit, which is labelled unconstrained unless the data constrain it.
 - Stores ranked sources and volunteer classifications in SQLite, and exports JSON/CSV.
+- **Phase Three:** measures F(λ, t) per exposure on native pixels for the target and tracked
+  sources, each at its own wavelength and mid-exposure time, with explicit measurement states
+  (valid, flagged, upper limit, saturated, masked, off-image). It shows spectra by epoch,
+  per-detector light curves, and four separate change statistics (brightness at λ₀, slope,
+  colour, model-free same-wavelength pairs), checked against field stars, against model
+  adequacy, and against saturation-flagged data.
 
 ## Latest validation (cached real cutouts, final code, live catalogues)
 
@@ -33,9 +40,19 @@ Details: [docs/PHASE2.md](docs/PHASE2.md) (methods, validation, limitations),
 | RW Aurigae | 2489 → 1808 → 1282 mJy at 4.75 µm, p = 8.6×10⁻¹³ for constant flux. Not moving |
 | R Draconis | Saturated in every frame: no photometry, no variability claim |
 
-Tests: 107 offline tests pass (10 of them on real data), both in the project venv and in a
-brand-new venv built only from `backend/requirements-dev.txt`, on the final code. 6 live
-tests pass.
+Phase Three spectro-temporal validation (cached real data):
+
+| Target | Result |
+|---|---|
+| Barnard's Star | D3 saturated (refused). D6 flagged, 7% range: **no variability claim** (inconclusive / no change) |
+| ε Indi B | T-dwarf spectral structure cannot be separated from variability with this sampling: **inconclusive** |
+| WISE 0855 | 0.5–0.7 mJy with upper limits; **no significant change** in D5 or D6 |
+| RW Aurigae | 4.8 µm fades 2333 → 1633 → 1148 mJy while 1.9 µm stays ~470–535 mJy: **chromatic dimming, conditional** (all data OVERFLOW-flagged); also varies within epochs |
+| R Draconis | saturated everywhere: **no spectral or variability conclusion** |
+
+Tests: 137 offline tests pass (107 from Phase Two, unchanged, plus 30 new; 19 of them on
+real data). 6 live tests are not affected by Phase Three (last run: 6 passed, during Phase
+Two close-out).
 
 ## Known limitations (summary)
 
@@ -50,13 +67,17 @@ tests pass.
   and its controls only bound false-alarm rates to ≤ 1/(n + 1).
 - IRSA catalogue access is intermittent.
 
-## Phase Three (not started)
+## Remaining work (after Phase Three)
 
-1. Spectro-temporal F(λ, t) per source and epoch; band-dependent light curves; comparison
-   with IRSA's Spectrophotometry Tool.
-2. Anomaly scores normalised against sources of similar brightness, coverage and quality,
+Done in Phase Three: spectro-temporal F(λ, t), band light curves, wavelength-dependent change
+statistics. See docs/PHASE3.md §8 for what was deferred, including the CWAVE/CBAND
+calibration, ePSF photometry, more detectors per target, a within-epoch variability metric
+and an external IRSA comparison.
+
+Still open from Phase Two:
+1. Anomaly scores normalised against sources of similar brightness, coverage and quality,
    plus a synthetic-injection false-positive study.
-3. Per-exposure Gaia registration and a PSF model inside shift-and-stack; honest velocity
+2. Per-exposure Gaia registration and a PSF model inside shift-and-stack; honest velocity
    errors.
-4. Parallax once SPHEREx provides at least 4–6 epochs per field.
-5. Re-verify the Docker image (Python 3.11).
+3. Parallax once SPHEREx provides at least 4–6 epochs per field.
+4. Re-verify the Docker image (Python 3.11).

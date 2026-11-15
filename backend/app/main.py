@@ -157,6 +157,7 @@ async def frames(
     group: str = Query("detector_epoch", pattern="^(epoch|detector_epoch|single)$"),
     quality: Optional[str] = Query(None, pattern="^(low|mid|high)$", description="Max exposures/group: low=fast, high=full quality"),
     shiftstack: bool = Query(False, description="Also run the trial-motion shift-and-stack search on the fetched exposures (slower: ~20 control searches per detector)"),
+    spectrotemporal: bool = Query(False, description="Also measure F(lambda, t) per exposure on native pixels for the target and tracked sources (app/spectrotemporal.py)"),
 ):
     """NDJSON stream: one processed, combined frame per line, as soon as
     each is ready. Each line carries width/height/scale/offset + a base64
@@ -175,7 +176,7 @@ async def frames(
     def generate():
         try:
             for encoded in stream_frames(resolved, fov_arcmin, det_list, group, resolve_seconds, max_exposures,
-                                         shiftstack=shiftstack):
+                                         shiftstack=shiftstack, spectrotemporal=spectrotemporal):
                 if isinstance(encoded, dict):  # the end-of-stream analysis record
                     _store_candidates(encoded, position)
                     yield (json.dumps(clean(encoded), allow_nan=False) + "\n").encode("utf-8")

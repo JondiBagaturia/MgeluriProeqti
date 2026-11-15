@@ -46,6 +46,7 @@
       </fieldset>
 
       <label title="Searches every fetched exposure for faint sources moving along a straight line, with time-shuffled control searches. Adds roughly 10-30 s per detector after the frames arrive."><input id="shiftstack-checkbox" type="checkbox"> Shift-and-stack search (slower)</label>
+      <label title="Measures every fetched exposure on its own pixels, at its own wavelength and time, for the target and the tracked sources: F(lambda, t). Adds a few seconds to a minute after the frames arrive."><input id="st-checkbox" type="checkbox"> Spectro-temporal analysis F(λ, t)</label>
       <label>Quality <span id="quality-value">Mid (balanced)</span>
         <input id="quality-slider" type="range" min="0" max="2" value="1" step="1">
       </label>
@@ -170,6 +171,35 @@
         </table>
       </div>
       <div id="analysis-detail" class="analysis-detail"></div>
+    </div>
+
+    <div class="analysis-wrap" id="st-panel">
+      <h2>Spectro-temporal analysis <span class="status-text">(measured flux per exposure, F(λ, t); each exposure sees ONE wavelength, so a SPHEREx spectrum is assembled from exposures taken at different times)</span></h2>
+      <p id="st-status" class="status-text"></p>
+      <div id="st-body" hidden>
+        <label>Source <select id="st-source-select"></select></label>
+        <h3>Spectrum by epoch</h3>
+        <p class="status-text">F<sub>ν</sub> in mJy (r = 9″ aperture, not aperture-corrected). One panel per detector: the gap between detectors is not observed. Filled = valid; hollow = valid but a saturation-related flag is in the aperture; arrow = 3σ upper limit; × on the baseline = no flux (red: saturated). Coloured bars under each panel: wavelengths actually sampled per epoch. Points of one epoch were taken over several days; only dichroic pairs (D1/D4, D2/D5, D3/D6) are simultaneous. No line is drawn between points.</p>
+        <div id="st-epoch-boxes" class="st-epoch-boxes"></div>
+        <canvas id="st-sed-canvas" width="900" height="260"></canvas>
+        <p id="st-hover" class="status-text">Hover a point to see its measurement.</p>
+        <h3>Light curves by detector</h3>
+        <canvas id="st-lc-canvas" width="900" height="240"></canvas>
+        <h3>Change statistics</h3>
+        <p class="status-text">Each statistic is a test against "no change" with the stated errors (statistical + a 2.5 % per-exposure systematic floor measured on field stars), compared with stationary field stars in the same field when there are enough. A p-value is not the probability that the source is variable; "significant" describes the measurement, not its physical cause.</p>
+        <div id="st-metrics"></div>
+        <h3>Wavelength coverage</h3>
+        <div id="st-coverage" class="analysis-table-scroll"></div>
+        <details>
+          <summary>All measurements</summary>
+          <div class="analysis-table-scroll">
+            <table class="analysis-table">
+              <thead><tr><th>Date</th><th>MJD (mid)</th><th>Epoch</th><th>obs_id</th><th>Det</th><th>λ (µm)</th><th>Bandwidth (µm)</th><th>F (mJy)</th><th>σ (mJy)</th><th>S/N</th><th>3σ limit (mJy)</th><th>State</th><th>Flags in aperture</th></tr></thead>
+              <tbody id="st-table-body"></tbody>
+            </table>
+          </div>
+        </details>
+      </div>
     </div>
   </main>
 </div>

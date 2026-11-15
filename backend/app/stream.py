@@ -50,6 +50,7 @@ def stream_frames(
     cutout_source=None,
     exposure_sink: Optional[list] = None,
     shiftstack: bool = False,
+    spectrotemporal: bool = False,
 ) -> Iterator[object]:
     """Yields EncodedFrame objects as groups complete, then (unless
     `analyze` is False) one final dict {"type": "analysis", ...} with the
@@ -120,8 +121,14 @@ def stream_frames(
 
     t_fetch_start = time.time()
     fetch = cutout_source or fetch_cutouts
+    for r in records_to_fetch:
+        grid.requested_by_detector[r.detector] = grid.requested_by_detector.get(r.detector, 0) + 1
     for cutout in fetch(records_to_fetch, centred_coord, fov_arcmin=fov_arcmin):
         n_fetched += 1
+        grid.fetched_by_detector[cutout.record.detector] = grid.fetched_by_detector.get(cutout.record.detector, 0) + 1
+        if spectrotemporal:
+            # native pixels, untouched: spectro-temporal photometry is done on these
+            grid.native_cutouts.append(cutout)
         stats.record_fetch(cutout)
 
         t0 = time.time()
@@ -161,6 +168,13 @@ def stream_frames(
             analysis = run_analysis(grid, fov_arcmin, mode)
             if shiftstack:
                 analysis["shift_stack"] = run_shift_stack(grid)
+            if spectrotemporal:
+                # Isolated: a failure here must never discard the frames analysis above.
+                try:
+                    analysis["spectrotemporal"] = run_spectrotemporal(grid, analysis)
+                except Exception as exc:  # noqa: BLE001
+                    log.exception("spectro-temporal analysis failed")
+                    analysis["spectrotemporal"] = {"error": f"{type(exc).__name__}: {exc}", "sources": []}
         except Exception as exc:  # noqa: BLE001 - analysis must never take the frames down with it
             log.exception("analysis failed")
             analysis = {"type": "analysis", "error": f"{type(exc).__name__}: {exc}", "series": []}
@@ -186,6 +200,10 @@ class _GridContext:
         # Individual processed exposures, kept only when a shift-and-stack
         # search was requested (each is one small grid image + variance).
         self.exposures: list = []
+        # Native (not resampled) cutouts, kept only for the spectro-temporal analysis.
+        self.native_cutouts: list = []
+        self.requested_by_detector: dict = {}
+        self.fetched_by_detector: dict = {}
 
     def wcs_metadata(self) -> dict:
         # FITS conventions: crpix is 1-based. cdelt in degrees. Array row 0 is
@@ -519,3 +537,110 @@ def run_shift_stack(grid: "_GridContext") -> dict:
         }
         out["series"].append(entry)
     return out
+
+
+MAX_SPECTRO_SOURCES = 20
+
+
+def _sep_arcsec(ra1, dec1, ra2, dec2):
+    import math
+    dra = ((ra1 - ra2 + 180.0) % 360.0 - 180.0) * math.cos(math.radians(0.5 * (dec1 + dec2)))
+    return math.hypot(dra, dec1 - dec2) * 3600.0
+
+
+def run_spectrotemporal(grid: "_GridContext", analysis: dict) -> dict:
+    """F(lambda, t) for the target and the tracked sources, on the native
+    cutouts fetched for this request (app/spectrotemporal.py)."""
+    from .spectrotemporal import (analyse_source, assign_measurement_epochs, measure_exposure,
+                                  reference_distribution, source_positions_at)
+
+    cutouts = sorted(grid.native_cutouts, key=lambda c: c.record.time_mjd)
+    retrieval_failed = {d: grid.requested_by_detector.get(d, 0) - grid.fetched_by_detector.get(d, 0)
+                        for d in grid.requested_by_detector}
+
+    # ---- sources: the target, then tracked sources (deduplicated across detector series)
+    sources = []
+    if grid.resolved.has_proper_motion:
+        def target_pos(mjd):
+            c = grid.resolved.propagate_to(Time(mjd, format="mjd"))
+            return float(c.ra.deg), float(c.dec.deg)
+        motion_note = "catalogue proper motion applied per exposure"
+    else:
+        def target_pos(mjd):
+            return float(grid.resolved.coord.ra.deg), float(grid.resolved.coord.dec.deg)
+        motion_note = "fixed position"
+    sources.append({"id": "target", "label": grid.resolved.name or "Target", "kind": "target",
+                    "position": target_pos, "motion": motion_note, "linked_tracks": []})
+
+    tracks = []
+    for series in analysis.get("series", []):
+        for t in series.get("tracks", []):
+            if t["n_epochs"] >= 2 and t["detection_snr_median"] >= 5:
+                tracks.append((series["series"], t))
+    tracks.sort(key=lambda st: st[1]["rank"])
+    t_ref_c = grid.resolved.propagate_to(Time(float(np.mean([c.record.time_mjd for c in cutouts])), format="mjd")) \
+        if cutouts else grid.resolved.coord
+    refs = []
+    for series_key, t in tracks:
+        if any(_sep_arcsec(t["ra_deg"], t["dec_deg"], s.get("ra", 1e9), s.get("dec", 1e9)) < 4.0 for s in sources[1:]):
+            for s in sources[1:]:
+                if _sep_arcsec(t["ra_deg"], t["dec_deg"], s["ra"], s["dec"]) < 4.0:
+                    s["linked_tracks"].append({"series": series_key, "rank": t["rank"], "candidate_id": t.get("candidate_id")})
+            continue
+        if _sep_arcsec(t["ra_deg"], t["dec_deg"], float(t_ref_c.ra.deg), float(t_ref_c.dec.deg)) < 6.0:
+            sources[0]["linked_tracks"].append({"series": series_key, "rank": t["rank"], "candidate_id": t.get("candidate_id")})
+            continue
+        m = t["motion"]
+        moving = m.get("pm_significance") is not None and m["pm_significance"] >= 3
+        pe, pn = (m["pmra_mas_yr"], m["pmdec_mas_yr"]) if moving else (None, None)
+        ra0, dec0, ep = t["ra_deg"], t["dec_deg"], t["epoch_mjd"]
+        src = {"id": f"{series_key}#{t['rank']}", "label": f"{series_key} #{t['rank']} ({t['label']})", "kind": "track",
+               "ra": ra0, "dec": dec0,
+               "position": (lambda mjd, ra0=ra0, dec0=dec0, ep=ep, pe=pe, pn=pn: source_positions_at(ra0, dec0, ep, pe, pn, mjd)),
+               "motion": "measured proper motion applied" if moving else "fixed position (no significant motion)",
+               "linked_tracks": [{"series": series_key, "rank": t["rank"], "candidate_id": t.get("candidate_id")}]}
+        is_ref = (not moving and t["detection_snr_median"] >= 30 and t["reliability"] == "high"
+                  and not {"near_bright_star", "core_masked", "near_edge", "ambiguous_link"} & set(t["flags"]))
+        if is_ref:
+            refs.append(src)
+        if len(sources) < MAX_SPECTRO_SOURCES + 1:
+            sources.append(src)
+
+    def measure(src):
+        meas = []
+        for c in cutouts:
+            t_mid = c.hdul["IMAGE"].header.get("MJD-AVG", c.record.time_mjd)
+            ra, dec = src["position"](float(t_mid))
+            meas.append(measure_exposure(c, src["id"], ra, dec, fits_ref=c.record.obs_id))
+        epochs = assign_measurement_epochs(meas)
+        return meas, epochs
+
+    ref_results = []
+    for src in refs:
+        meas, epochs = measure(src)
+        ref_results.append(analyse_source(meas, epochs))
+    reference = reference_distribution(ref_results)
+
+    out_sources = []
+    for src in sources:
+        meas, epochs = measure(src)
+        res = analyse_source(meas, epochs, reference=reference)
+        out_sources.append({"id": src["id"], "label": src["label"], "kind": src["kind"], "motion": src["motion"],
+                            "is_reference_star": src in refs, "linked_tracks": src["linked_tracks"], **res})
+
+    ref_summary = {k: {"n": v["n"], "median": float(np.median(v["values"])),
+                       "p05": float(np.percentile(v["values"], 5)), "p95": float(np.percentile(v["values"], 95)),
+                       "values": v["values"]} for k, v in reference.items()}
+    # fit:<det>: reference stars' reduced chi^2 of the shape model (p95 = adequacy limit);
+    # other keys: reference stars' p-values of each metric
+    return {
+        "statement": ("Measured fluxes per exposure (one wavelength each) and interpretable change statistics. "
+                      "Exposures at different times are not a simultaneous spectrum; only dichroic detector pairs "
+                      "(D1/D4, D2/D5, D3/D6) are observed at the same instant. p-values describe consistency with "
+                      "'no change' given the stated errors, not the probability that a source is astrophysically variable."),
+        "n_exposures": len(cutouts),
+        "retrieval_failed_by_detector": retrieval_failed,
+        "reference": {"n_stars": len(refs), "metrics": ref_summary,
+                      "selection": "stationary (PM < 3 sigma), detection S/N >= 30, reliability high, no edge/blend/ringing/masked flags, >= 2 epochs"},
+        "sources": out_sources,
+    }
