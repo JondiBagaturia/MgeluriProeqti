@@ -1,5 +1,29 @@
 # SPHEREx Blink
 
+> **2026-11-15 audit:** see [docs/AUDIT.md](docs/AUDIT.md). Fixes since the
+> notes below: the viewer is now north-up (it was a mirror image), frames are
+> grouped per detector by default (cross-detector stacking mixed
+> wavelengths), the light curve and spectrum use background-subtracted
+> aperture photometry in mJy with ±1σ errors and refuse masked or saturated
+> apertures instead of interpolating them, the crosshair and photometry
+> follow proper motion per frame, the pixel readout uses the real grid WCS,
+> and `/api/spectrum` no longer returns 500 on NaN pixels. (The ~10 %
+> systematic floor measured then is now 3–7 %, after Phase Two.)
+>
+> **Discovery pipeline:** see [docs/DISCOVERY.md](docs/DISCOVERY.md). The app now
+> detects and tracks sources across epochs, fits proper motions, compares with
+> Gaia DR3 and CatWISE2020, ranks sources with stated reasons, and stores
+> volunteer classifications in SQLite (`data/discovery.sqlite`, or
+> `SPHEREX_DB_PATH`). Needs `photutils` (in `backend/requirements.txt`).
+>
+> **Phase Two (current state):** see [PROJECT_STATUS.md](PROJECT_STATUS.md) and
+> [docs/PHASE2.md](docs/PHASE2.md). Resampling is now Lanczos-3, not the
+> nearest-neighbour scheme described further down this README. Also added:
+> shift-and-stack for faint movers, a parallax-aware fit, and regression tests
+> on cached real cutouts of the five targets. Sections below that describe
+> nearest-neighbour resampling, a stateless backend, or "What doesn't (yet)"
+> are the pre-Phase-Two record.
+
 A public web tool to blink NASA SPHEREx epochs at any sky position, so moving
 or variable objects pop out visually — the same idea volunteers used on
 [WiseView](http://byw.tools/wiseview) to find brown dwarfs in WISE data.
@@ -43,28 +67,36 @@ blink comparator needs.
 
 ### Run it
 ```bash
-# Python 3.11 — astropy/astroquery/reproject/numpy have no wheels yet for
-# newer Pythons as of Nov 2026 (see PLAN.md).
-python3.11 -m venv .venv
-source .venv/bin/activate
-pip install -r backend/requirements.txt
+# Tested with Python 3.12.7 (Phase Two). The Docker image uses 3.11, which
+# was not re-verified. Python 3.14 has no wheels for the astro stack yet.
+python -m venv .venv
+source .venv/bin/activate            # Windows: .venv\Scripts\activate
+pip install -r backend/requirements.txt          # app only
+pip install -r backend/requirements-dev.txt      # app + tests
 
 cd backend
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 # open http://localhost:8000/
+
+python -m pytest              # offline tests, incl. real-data regression tests (no network)
+python -m pytest -m live      # optional: hits SIMBAD and IRSA
 ```
 Or with Docker:
 ```bash
 docker compose up --build
 # open http://localhost:8000/
 ```
-The backend is stateless (no database, no disk cache — see PLAN.md), so it
-scales horizontally behind any load balancer with zero shared state.
+The image pipeline is stateless. Since Phase Two, the one exception is a small
+SQLite file of ranked sources and volunteer classifications
+(`data/discovery.sqlite`, or `SPHEREX_DB_PATH`; a Docker volume in
+docker-compose.yml). Several replicas would need a shared database.
 
 ### The fullscreen interface
 On this branch the image fills the whole window and the controls are
-framed windows that stay hidden until you need them. (The original layout,
-with the controls in a sidebar, is on the `main` branch.)
+framed windows that stay hidden until you need them. It runs on the Phase
+Two discovery pipeline (`phase2-discovery-pipeline`): same backend, same
+analysis, a different page. (The original layout, with the controls in a
+sidebar, is on the `main` and `phase2-discovery-pipeline` branches.)
 
 - Move the cursor to an edge of the window to open the window that lives
   there: search (top), display controls (left), light curve / spectrum /
@@ -74,8 +106,18 @@ with the controls in a sidebar, is on the `main` branch.)
   press Esc to close them.
 - Scroll to zoom. On a touch screen, the ☰ button in the corner opens and
   closes the windows.
+- The bottom bar's **Detector** list picks which detector series is shown
+  (detectors are different wavelengths, so they are never blinked against
+  each other).
+- **Sources** in the bottom bar opens the *Tracked sources* window: the
+  ranked table, the reasons and catalogue matches for the selected row,
+  volunteer classification, export, and the shift-and-stack report. The
+  selected source and the other tracked sources are ringed on the image;
+  the red cross follows the target's predicted position frame by frame.
+  Esc or the window's square closes it.
 - While images download, the bar at the top counts them, for example
-  `9 / 15 images downloaded (60%), 1 / 3 frame(s) ready`.
+  `9 / 15 images downloaded (60%), 1 / 3 frame(s) ready`; after the last
+  one it says the source analysis is running.
 - If the IRSA archive is not answering, the page quietly retries up to 5
   times before it reports the problem.
 

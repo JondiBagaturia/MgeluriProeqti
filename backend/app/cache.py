@@ -36,11 +36,18 @@ class TTLDedupeCache:
 
         try:
             result = await task
-        finally:
+        except BaseException:
+            # A failure is never cached (the next request retries), and the
+            # original exception (e.g. an HTTPException 502) is re-raised as
+            # is. Previously this path read an unset `result` and turned every
+            # upstream failure into an opaque 500.
             async with self._lock:
                 self._inflight.pop(key, None)
-                self._done[key] = (time.time(), result)
-                self._sweep_locked()
+            raise
+        async with self._lock:
+            self._inflight.pop(key, None)
+            self._done[key] = (time.time(), result)
+            self._sweep_locked()
         return result
 
     def _sweep_locked(self) -> None:

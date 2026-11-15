@@ -64,9 +64,17 @@ a:hover { color: var(--ink-bright); }
   image-rendering: pixelated;
   cursor: crosshair;
 }
-/* Gapped cross on the target. The target is always the grid centre and the
-   canvas is always centred in the stage, so this sits at the stage centre
-   and keeps a constant on-screen size at any zoom. */
+/* Markers over the image, drawn at screen resolution by app.js. */
+#overlay-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+/* Gapped cross on the target. app.js places it (left/top) on the target's
+   predicted position in the frame on screen, so it follows proper motion,
+   and it keeps a constant on-screen size at any zoom. */
 #crosshair {
   position: absolute;
   left: 50%;
@@ -179,7 +187,7 @@ a:hover { color: var(--ink-bright); }
 .dock-bottom {
   bottom: 16px;
   left: 50%;
-  width: min(860px, calc(100vw - 32px));
+  width: min(1040px, calc(100vw - 32px));
   transform: translateX(-50%);
   z-index: 12;
 }
@@ -635,4 +643,192 @@ body.show-all #progress-wrap {
 
 @media (prefers-reduced-motion: reduce) {
   .dock, #progress-wrap, #progress-bar { transition: none; }
+}
+
+/* Orientation note, bottom left of the sky: the display is always north up. */
+#compass {
+  position: absolute;
+  left: 18px;
+  bottom: 14px;
+  color: var(--ink);
+  font-size: 15px;
+  text-shadow: 0 1px 0 #000, 0 0 4px #000;
+  pointer-events: none;
+}
+
+/* Detector choice in the bottom bar: same framed select as in the windows. */
+.playback-bar select {
+  -webkit-appearance: none;
+  appearance: none;
+  padding: 4px 26px 5px 8px;
+  background: #000 url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='7' viewBox='0 0 10 7'%3E%3Cpath d='M0 0h10L5 7z' fill='%23b89d62'/%3E%3C/svg%3E") right 8px center no-repeat;
+  color: var(--ink-bright);
+  border: 1px solid var(--frame);
+  border-radius: 0;
+  font: inherit;
+  font-size: 14.5px;
+}
+.playback-bar select:hover { border-color: var(--frame-hi); }
+.playback-bar select option { background: var(--win-solid); color: var(--ink); }
+.playback-bar .text-btn { padding: 4px 12px 5px; font-size: 15px; }
+#sources-btn[aria-pressed="true"] { color: var(--ink-bright); border-color: var(--ink-bright); }
+
+/* ------------------------------------------------- tracked sources window */
+/* A fifth window, opened on request (Sources button) rather than by an
+   edge: a wide table needs the middle of the screen. It sits above the
+   bottom bar, which stays up with it - stepping frames and switching
+   detector is how the table is read. */
+.sources-window {
+  position: fixed;
+  left: 50%;
+  bottom: calc(var(--bottom-dock-h, 150px) + 34px);
+  z-index: 13;
+  display: flex;
+  flex-direction: column;
+  width: min(1180px, calc(100vw - 32px));
+  max-height: min(58vh, calc(100vh - var(--bottom-dock-h, 150px) - 70px));
+  transform: translateX(-50%);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 0.14s linear, visibility 0s linear 0.14s;
+}
+body.show-sources .sources-window {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transition: opacity 0.14s linear;
+}
+body.show-sources .dock-bottom { opacity: 1; pointer-events: auto; }
+body.show-sources #edge-hint { display: none; }
+
+/* The closing square carries a diagonal cross instead of a pin's fill. */
+.close-btn {
+  background:
+    linear-gradient(45deg, transparent 44%, var(--frame-hi) 44% 56%, transparent 56%),
+    linear-gradient(-45deg, transparent 44%, var(--frame-hi) 44% 56%, transparent 56%),
+    #000;
+}
+.close-btn:hover { border-color: var(--ink-bright); }
+
+.analysis-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  margin-bottom: 8px;
+}
+.analysis-toolbar label { margin: 0 auto 0 0; }
+.analysis-toolbar .text-btn { padding: 3px 12px 4px; font-size: 14.5px; }
+
+.sources-columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1.55fr) minmax(280px, 1fr);
+  gap: 14px;
+  align-items: start;
+}
+.analysis-table-scroll,
+.analysis-detail {
+  max-height: 270px;
+  overflow: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--frame) #000;
+}
+.analysis-table-scroll {
+  background: var(--inset);
+  border: 1px solid var(--frame-lo);
+  box-shadow: inset 0 0 0 1px #000;
+}
+.analysis-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+.analysis-table th,
+.analysis-table td {
+  padding: 3px 10px 4px;
+  text-align: left;
+  white-space: nowrap;
+  border-bottom: 1px solid rgba(125, 107, 69, 0.28);
+}
+.analysis-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--win-solid);
+  color: var(--ink-bright);
+  font-weight: 400;
+  border-bottom-color: var(--frame);
+}
+.analysis-table tbody tr:hover { background: rgba(202, 165, 96, 0.12); color: var(--ink-bright); }
+.analysis-table tbody tr.selected {
+  background: rgba(96, 112, 202, 0.3);
+  color: var(--ink-bright);
+  box-shadow: inset 2px 0 0 var(--frame-hi);
+}
+
+.analysis-detail { font-size: 14.5px; line-height: 1.4; padding-right: 4px; }
+.analysis-detail h3,
+.shiftstack-panel h3 {
+  margin: 0 0 6px;
+  font-size: 16px;
+  font-weight: 400;
+  color: var(--ink-bright);
+}
+.analysis-detail strong,
+.shiftstack-panel strong { font-weight: 400; color: var(--ink-bright); }
+.analysis-detail ul,
+.shiftstack-panel ul { margin: 2px 0 8px 18px; padding: 0; list-style: square; }
+.vote-box { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--frame-lo); }
+.vote-buttons { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
+.vote-buttons .text-btn { padding: 3px 10px 4px; font-size: 14.5px; }
+.vote-buttons .text-btn.chosen {
+  color: var(--ink-bright);
+  border-color: var(--ink-bright);
+  background: rgba(96, 112, 202, 0.38);
+}
+
+.shiftstack-panel {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--frame-lo);
+  font-size: 14.5px;
+  line-height: 1.4;
+}
+.shiftstack-panel:empty { display: none; }
+.kv-table { border-collapse: collapse; margin: 6px 0; font-size: 14px; }
+.kv-table th {
+  padding: 2px 14px 2px 0;
+  text-align: left;
+  vertical-align: top;
+  white-space: nowrap;
+  font-weight: 400;
+  color: var(--ink-dim);
+}
+.kv-table td { padding: 2px 0; }
+.badge {
+  display: inline-block;
+  padding: 0 7px 1px;
+  border: 1px solid currentColor;
+  font-size: 13px;
+  white-space: nowrap;
+}
+.badge-ok { color: #8fe6a0; }
+.badge-warn { color: #f0b64e; }
+.badge-dim { color: var(--ink-dim); }
+.uncertainty-box {
+  margin: 8px 0;
+  padding: 6px 10px;
+  border-left: 2px solid #f0b64e;
+  background: rgba(240, 182, 78, 0.06);
+  font-size: 14px;
+}
+.uncertainty-box ul { margin: 4px 0 0 16px; }
+
+@media (max-width: 900px) {
+  .sources-columns { grid-template-columns: minmax(0, 1fr); }
+  .sources-window { max-height: calc(100vh - var(--bottom-dock-h, 150px) - var(--top-dock-h, 96px) - 70px); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sources-window, body.show-sources .sources-window { transition: none; }
 }

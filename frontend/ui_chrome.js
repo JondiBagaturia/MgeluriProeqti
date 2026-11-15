@@ -6,9 +6,10 @@
  * the dock itself, or while a control inside is being used from the
  * keyboard. Two game-menu conventions sit on top of that: a window's pin
  * square keeps it open, and right-clicking the sky toggles "menu mode"
- * (every window open at once, Esc to leave). This file only toggles
- * body.show-<edge> / body.show-all classes - all visuals are in style.css,
- * all viewer logic stays in app.js.
+ * (every window open at once, Esc to leave). A fifth window, Tracked
+ * sources, opens from its button in the bottom bar. This file only toggles
+ * body.show-<edge> / body.show-all / body.show-sources classes - all
+ * visuals are in style.css, all viewer logic stays in app.js.
  */
 (function () {
   "use strict";
@@ -119,6 +120,7 @@
     if (ev.key !== "Escape") return;
     pinned.right = false;
     body.classList.remove("show-all");
+    setSourcesOpen(false);
     if (document.activeElement && document.activeElement !== body) document.activeElement.blur();
     update();
   });
@@ -139,6 +141,19 @@
     body.classList.toggle("show-all");
     dismissHint();
   });
+
+  // --- Tracked sources window: opened on request, not by an edge ----------
+  // (its table needs the middle of the screen). The Sources button in the
+  // bottom bar toggles it; its closing square and Esc close it. While it is
+  // open the bottom bar stays up with it (style.css).
+  const sourcesBtn = document.getElementById("sources-btn");
+  function setSourcesOpen(open) {
+    body.classList.toggle("show-sources", open);
+    sourcesBtn.setAttribute("aria-pressed", String(open));
+    if (open) dismissHint();
+  }
+  sourcesBtn.addEventListener("click", () => setSourcesOpen(!body.classList.contains("show-sources")));
+  document.getElementById("sources-close").addEventListener("click", () => setSourcesOpen(false));
 
   // --- States where hiding everything would leave the user stranded -------
 

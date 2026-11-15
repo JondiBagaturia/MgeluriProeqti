@@ -26,6 +26,7 @@
   const detectorFieldset = $("detector-fieldset");
   const qualitySlider = $("quality-slider");
   const qualityValue = $("quality-value");
+  const shiftstackCheckbox = $("shiftstack-checkbox");
   const QUALITY_LEVELS = ["low", "mid", "high"];
   const QUALITY_LABELS = ["Low (fastest)", "Mid (balanced)", "High (full quality)"];
   const stretchSelect = $("stretch-select");
@@ -66,9 +67,20 @@
   const spectrumCanvas = $("spectrum-canvas");
   const spectrumCtx = spectrumCanvas.getContext("2d");
   const spectrumStatus = $("spectrum-status");
+  const detectorViewSelect = $("detector-view-select");
+  // Bump when the frame wire format changes, so stale IndexedDB entries
+  // (e.g. frames without grid WCS / photometry) are never revived.
+  const FRAME_SCHEMA = "v4";
+  // Click within this distance of the predicted target position -> spectrum
+  // follows the target's proper motion per exposure (2 native pixels).
+  const TRACK_CLICK_RADIUS_ARCSEC = 12.3;
 
   const stage = $("stage");
   const crosshair = $("crosshair");
+  const compass = $("compass");
+  const overlay = $("overlay-canvas");
+  const overlayCtx = overlay.getContext("2d");
+  const sourcesBtn = $("sources-btn");
   const fillCheckbox = $("fill-checkbox");
   const fullscreenBtn = $("fullscreen-btn");
 
@@ -76,11 +88,16 @@
   // State
   // ---------------------------------------------------------------------
   const state = {
-    frames: [], // {groupIndex, timeMjdMean, detectors, nExposures, centralWavelengthUm, bandwidthUm, contamination, width, height, scale, offset, data: Uint16Array}
+    allFrames: [], // every frame received, all detectors
+    frames: [], // the subset currently shown (one detector series), time-ordered: {groupIndex, timeMjdMean, detectors, nExposures, centralWavelengthUm, bandwidthUm, contamination, width, height, scale, offset, data: Uint16Array}
     currentIndex: 0,
     playing: false,
     playTimer: null,
-    resolvedCoord: null, // {ra, dec}
+    resolvedCoord: null, // {ra, dec} at the catalogue reference epoch (J2000) - NOT the grid centre
+    resolved: null, // full /api/resolve response
+    analysis: null, // end-of-stream {"type":"analysis"} record
+    selectedRank: null, // rank of the tracked source selected in the table (current series)
+    query: "",
     fovArcmin: 5,
     releaseTag: "unknown",
     abFrames: [0, 0],
@@ -133,18 +150,20 @@
       position: params.get("position") || "",
       fov: parseFloat(params.get("fov")) || 5,
       detectors: (params.get("detectors") || "D2,D6").split(",").filter(Boolean),
-      mode: params.get("mode") || "epoch",
+      mode: params.get("mode") || "detector_epoch",
       quality: QUALITY_LEVELS.includes(quality) ? quality : "mid",
+      shiftstack: params.get("shiftstack") === "1",
     };
   }
 
-  function writeUrlState({ position, fov, detectors, mode, quality }) {
+  function writeUrlState({ position, fov, detectors, mode, quality, shiftstack }) {
     const params = new URLSearchParams();
     params.set("position", position);
     params.set("fov", fov);
     params.set("detectors", detectors.join(","));
     params.set("mode", mode);
     params.set("quality", quality);
+    if (shiftstack) params.set("shiftstack", "1");
     const url = `${location.pathname}?${params.toString()}`;
     history.replaceState(null, "", url);
     const fullUrl = location.origin + url;
@@ -186,13 +205,134 @@
   // size is pure CSS (crisp nearest-neighbour scaling via
   // image-rendering: pixelated). Zoom 1× fits the whole field inside the
   // window - or covers the window when "Fill the screen" is ticked - and
-  // higher zoom magnifies about the centre, which is always the target.
+  // higher zoom magnifies about the centre of the field.
   function layoutCanvas() {
     const rect = stage.getBoundingClientRect();
     const fit = fillCheckbox.checked ? Math.max(rect.width, rect.height) : Math.min(rect.width, rect.height);
     const size = Math.round(fit * parseFloat(zoomSlider.value));
     canvas.style.width = `${size}px`;
     canvas.style.height = `${Math.round((size * canvas.height) / canvas.width)}px`;
+    drawOverlay();
+  }
+
+  // ---------------------------------------------------------------------
+  // Overlay: everything drawn ON TOP of the image - the crosshair at the
+  // target's predicted position in this frame, markers for tracked
+  // sources, shift-and-stack candidates. The image canvas is one pixel per
+  // grid pixel and only scaled by CSS, so strokes drawn into it would be
+  // as blocky as the image; these go on a second canvas that covers the
+  // stage at screen resolution instead.
+  // ---------------------------------------------------------------------
+  const LABEL_COLORS = { candidate: "#f0b64e", catalogued: "#8b9bea", uncertain: "#8f8160", unverified: "#c0a2ea" };
+  const SELECTED_COLOR = "#8fe6a0";
+
+  /** Returns a function mapping a 0-based grid ARRAY position (row 0 is the
+   * south edge - the display is north-up, see renderGrid) to CSS pixels in
+   * the stage, plus the on-screen size of one grid pixel. */
+  function gridToStageMapper(grid) {
+    const c = canvas.getBoundingClientRect();
+    const s = stage.getBoundingClientRect();
+    const sx = c.width / grid.width;
+    const sy = c.height / grid.height;
+    const toStage = (x, y) => [c.left - s.left + (x + 0.5) * sx, c.top - s.top + (grid.height - 1 - y + 0.5) * sy];
+    return { toStage, pixel: sx };
+  }
+
+  function drawOverlay() {
+    const s = stage.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    const w = Math.max(1, Math.round(s.width * dpr));
+    const h = Math.max(1, Math.round(s.height * dpr));
+    if (overlay.width !== w) overlay.width = w;
+    if (overlay.height !== h) overlay.height = h;
+    overlayCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    overlayCtx.clearRect(0, 0, s.width, s.height);
+
+    const grid = state.lastRenderedGrid;
+    if (!grid || state.frames.length === 0) {
+      crosshair.hidden = true;
+      compass.hidden = true;
+      return;
+    }
+    const { toStage, pixel } = gridToStageMapper(grid);
+
+    // Crosshair at the target's PREDICTED position in this frame (follows
+    // proper motion); falls back to the grid centre. A CSS element
+    // (#crosshair in style.css): gapped, red, constant size - the same look
+    // as the planet-x renderer's blink.py (fill=(255,80,80)).
+    const tp = grid.frame && grid.frame.targetPixel ? grid.frame.targetPixel : { x: (grid.width - 1) / 2, y: (grid.height - 1) / 2 };
+    const [tx, ty] = toStage(tp.x, tp.y);
+    crosshair.style.left = `${tx}px`;
+    crosshair.style.top = `${ty}px`;
+    crosshair.hidden = false;
+    compass.hidden = false; // the display is always north up, east left
+
+    const viewMode = viewModeSelect.value;
+    overlayCtx.font = '15px "Almendra", Georgia, serif';
+    overlayCtx.lineJoin = "round";
+    overlayCtx.textBaseline = "middle";
+
+    if (viewMode === "shiftstack") {
+      // Moving candidates of the shift-and-stack search.
+      const e = currentShiftStack();
+      overlayCtx.strokeStyle = SELECTED_COLOR;
+      overlayCtx.lineWidth = 1.5;
+      for (const c of (e && e.blind && e.blind.candidates) || []) {
+        if (!c.moving) continue;
+        const [cx, cy] = toStage(c.x, c.y);
+        overlayCtx.beginPath();
+        overlayCtx.arc(cx, cy, Math.max(9, 3 * pixel), 0, 2 * Math.PI);
+        overlayCtx.stroke();
+      }
+      return;
+    }
+
+    // Tracked sources (not on the mean image: a mover has no single place there).
+    const series = currentSeriesAnalysis();
+    if (!series || viewMode === "sum") return;
+    const frameIdx = viewMode === "blink" ? state.currentIndex : null;
+    const sel = selectedTrack();
+
+    if (showTracksCheckbox.checked) {
+      for (const t of series.tracks) {
+        if (sel && t.rank === sel.rank) continue;
+        const d = frameIdx == null ? t.detections[0] : t.detections.find((q) => q.frame_index === frameIdx);
+        if (!d) continue;
+        const [cx, cy] = toStage(d.x, d.y);
+        const radius = Math.max(7, 2.2 * pixel);
+        overlayCtx.strokeStyle = LABEL_COLORS[t.label] || "#fff";
+        overlayCtx.lineWidth = 1.25;
+        overlayCtx.beginPath();
+        overlayCtx.arc(cx, cy, radius, 0, 2 * Math.PI);
+        overlayCtx.stroke();
+        // Rank number beside the ring, outlined in black so it reads on stars too.
+        overlayCtx.fillStyle = overlayCtx.strokeStyle;
+        overlayCtx.lineWidth = 3;
+        overlayCtx.strokeStyle = "rgba(0, 0, 0, 0.85)";
+        overlayCtx.strokeText(String(t.rank), cx + radius + 3, cy - radius * 0.5);
+        overlayCtx.fillText(String(t.rank), cx + radius + 3, cy - radius * 0.5);
+      }
+    }
+    if (sel) {
+      // Measured path across all epochs, then the detection in this frame.
+      overlayCtx.strokeStyle = SELECTED_COLOR;
+      overlayCtx.lineWidth = 1.5;
+      overlayCtx.beginPath();
+      sel.detections.forEach((d, i) => {
+        const [cx, cy] = toStage(d.x, d.y);
+        if (i === 0) overlayCtx.moveTo(cx, cy);
+        else overlayCtx.lineTo(cx, cy);
+      });
+      overlayCtx.stroke();
+      for (const d of sel.detections) {
+        const [cx, cy] = toStage(d.x, d.y);
+        const here = frameIdx != null && d.frame_index === frameIdx;
+        overlayCtx.lineWidth = here ? 2.5 : 1;
+        overlayCtx.beginPath();
+        overlayCtx.arc(cx, cy, here ? Math.max(10, 3 * pixel) : 3, 0, 2 * Math.PI);
+        overlayCtx.stroke();
+      }
+    }
   }
   zoomSlider.addEventListener("input", () => {
     zoomValue.textContent = `${zoomSlider.value}×`;
@@ -256,6 +396,7 @@
     const detectors = selectedDetectors();
     const mode = modeSelect.value;
     const quality = QUALITY_LEVELS[parseInt(qualitySlider.value, 10)];
+    const shiftstack = shiftstackCheckbox.checked;
 
     if (detectors.length === 0) {
       resolveStatus.textContent = "Pick at least one detector.";
@@ -267,13 +408,19 @@
     const generation = ++state.searchGeneration; // invalidates any earlier stream or pending retry
     stopPlayback();
     state.frames = [];
+    state.allFrames = [];
+    state.analysis = null;
+    state.selectedRank = null;
     state.currentIndex = 0;
+    detectorViewSelect.innerHTML = "";
+    renderAnalysis();
     frameSlider.max = 0;
     frameSlider.value = 0;
     emptyState.hidden = true;
     frameLabel.textContent = "";
     canvasCtx.clearRect(0, 0, canvas.width, canvas.height);
-    crosshair.hidden = true;
+    state.lastRenderedGrid = null;
+    drawOverlay();
 
     resolveStatus.textContent = "Resolving…";
     resolveStatus.className = "status-text";
@@ -293,14 +440,22 @@
     }
 
     state.resolvedCoord = { ra: resolved.ra_deg, dec: resolved.dec_deg };
+    state.resolved = resolved;
+    state.query = position;
     state.fovArcmin = fov;
 
-    let statusMsg = `${resolved.name || position} → RA ${resolved.ra_deg.toFixed(5)}, Dec ${resolved.dec_deg.toFixed(5)}`;
-    if (resolved.has_proper_motion) statusMsg += ` (proper motion known, propagated per epoch)`;
+    const epochYear = resolved.ref_epoch_mjd != null ? (2000 + (resolved.ref_epoch_mjd - 51544.5) / 365.25).toFixed(1) : "2000.0";
+    let statusMsg = `${resolved.name || position} → RA ${resolved.ra_deg.toFixed(5)}, Dec ${resolved.dec_deg.toFixed(5)} (position at epoch ${epochYear})`;
+    if (resolved.has_proper_motion) {
+      statusMsg +=
+        ` · proper motion (${resolved.pmra_mas_yr.toFixed(0)}, ${resolved.pmdec_mas_yr.toFixed(0)}) mas/yr: ` +
+        `the field is centred on the mean-epoch position and the crosshair follows the predicted position in each frame.`;
+    }
+    if (resolved.note) statusMsg += ` · ${resolved.note}`;
     resolveStatus.textContent = statusMsg;
     resolveStatus.className = "status-text";
 
-    writeUrlState({ position, fov, detectors, mode, quality });
+    writeUrlState({ position, fov, detectors, mode, quality, shiftstack });
 
     if (state.releaseTag === "unknown") {
       state.releaseTag = await fetchReleaseTag();
@@ -311,7 +466,7 @@
       ra: resolved.ra_deg,
       dec: resolved.dec_deg,
       fov,
-      group: `${mode}:${quality}`, // quality changes the actual pixel content, so it must be part of the key
+      group: `${FRAME_SCHEMA}:${mode}:${quality}:ss${shiftstack ? 1 : 0}`, // quality changes the actual pixel content, so it must be part of the key
       detector: detectors.slice().sort().join(""),
     });
 
@@ -321,16 +476,18 @@
 
     const cached = await window.SpherexCache.get(cacheKey);
     if (cached && cached.length) {
-      state.frames = cached.map(reviveFrame);
-      sortAndShowFirst();
-      progressText.textContent = `Loaded ${cached.length} frame(s) from local cache`;
+      const cachedAnalysis = cached.find((c) => c && c.__analysis);
+      state.analysis = cachedAnalysis ? cachedAnalysis.__analysis : null;
+      state.allFrames = cached.filter((c) => !(c && c.__analysis)).map(reviveFrame);
+      applyDetectorFilter(false);
+      progressText.textContent = `Loaded ${state.allFrames.length} frame(s) from local cache`;
       progressBar.style.width = "100%";
       setTimeout(() => (progressWrap.hidden = true), 1500);
       return; // cache hit: no network call for pixels at all
     }
 
     progressText.textContent = "Fetching from IRSA…";
-    streamFrames({ position, fov, detectors, mode, quality, cacheKey }, generation, 1);
+    streamFrames({ position, fov, detectors, mode, quality, cacheKey, shiftstack }, generation, 1);
   }
 
   // ---------------------------------------------------------------------
@@ -395,12 +552,12 @@
   }
 
   function reviveFrame(stored) {
-    return { ...stored, data: new Uint16Array(stored.data) };
+    return { ...stored, data: new Uint16Array(stored.data), gapFilled: new Set(stored.gapFilledIndices || []) };
   }
 
   async function streamFrames(request, generation, attempt) {
-    const { position, fov, detectors, mode, quality, cacheKey } = request;
-    const url = `${API_BASE}/api/frames?position=${encodeURIComponent(position)}&fov=${fov}&detectors=${detectors.join(",")}&group=${mode}&quality=${quality}&progress=1`;
+    const { position, fov, detectors, mode, quality, cacheKey, shiftstack } = request;
+    const url = `${API_BASE}/api/frames?position=${encodeURIComponent(position)}&fov=${fov}&detectors=${detectors.join(",")}&group=${mode}&quality=${quality}${shiftstack ? "&shiftstack=true" : ""}&progress=1`;
     let resp;
     try {
       // no-store: the server marks this response cacheable for 5 minutes
@@ -437,6 +594,9 @@
         let text = `${download.downloaded} / ${download.total} images downloaded (${percent}%)`;
         if (download.failed) text += `, ${download.failed} failed`;
         if (received) text += `, ${framesText}`;
+        // The source analysis (detection, tracking, catalogue queries) runs
+        // on the server after the last download and can take a while.
+        if (finished >= download.total && received && !state.analysis) text = `${framesText}, now detecting and tracking sources…`;
         progressText.textContent = text;
       } else if (received) {
         if (nGroups) progressBar.style.width = `${Math.min(100, (received / nGroups) * 100)}%`;
@@ -469,6 +629,12 @@
           showProgress();
           continue;
         }
+        if (obj.type === "analysis") {
+          state.analysis = obj;
+          renderAnalysis();
+          renderView();
+          continue;
+        }
         if (obj.error) {
           // Not shown here: with no frames it is retried quietly, with
           // some frames it is reported once the stream ends (both below).
@@ -489,42 +655,28 @@
           releaseVersions: obj.release_versions,
           partial: obj.partial,
           nGapFilledPixels: obj.n_gap_filled_pixels,
+          gapFilledIndices: obj.gap_filled_indices || [],
+          gapFilled: new Set(obj.gap_filled_indices || []),
+          photometry: obj.photometry || null,
+          targetPixel: obj.target_pixel || null,
+          gridWcs: obj.grid_wcs || null,
           width: obj.width,
           height: obj.height,
           scale: obj.scale,
           offset: obj.offset,
           data: base64ToUint16Array(obj.payload_b64),
         };
-        state.frames.push(frame);
+        state.allFrames.push(frame);
         received++;
         showProgress();
-        if (!firstFrameShown) {
-          firstFrameShown = true;
-          sortAndShowFirst();
-        } else {
-          // Frames can complete out of chronological order (a later epoch
-          // can finish before an earlier one). Re-sorting by groupIndex can
-          // move the frame the user is currently looking at to a different
-          // array slot, so track it by identity across the sort rather than
-          // leaving `currentIndex` pointing at whatever slot it used to be.
-          const shownGroupIndex = state.frames[state.currentIndex]
-            ? state.frames[state.currentIndex].groupIndex
-            : null;
-          sortFrames();
-          if (shownGroupIndex != null) {
-            const newIdx = state.frames.findIndex((f) => f.groupIndex === shownGroupIndex);
-            if (newIdx >= 0) state.currentIndex = newIdx;
-          }
-          updateFrameSlider();
-          // Re-render: cheap for these small arrays, and keeps the "Frame
-          // X/Y" count and light curve in sync as the total grows, even
-          // when the user is sitting on an already-rendered frame.
-          renderView();
-        }
+        // Frames complete out of chronological order; applyDetectorFilter
+        // re-sorts by time and keeps the frame on screen by identity.
+        applyDetectorFilter(firstFrameShown);
+        firstFrameShown = true;
       }
     }
 
-    if (state.frames.length === 0) {
+    if (state.allFrames.length === 0) {
       // Two different situations end with nothing to show; say which one.
       // The server reported a failure (IRSA unreachable or busy): that is
       // not "no images here", and trying again shortly usually works - so
@@ -538,30 +690,75 @@
       emptyState.textContent = "No SPHEREx images found at this position/FOV/detector selection.";
       return;
     }
-
-    progressText.textContent = streamError
-      ? `${state.frames.length} frame(s) loaded; the archive reported an error: ${streamError.slice(0, 120)}`
-      : `Done: ${state.frames.length} frame(s)`;
-    setTimeout(() => (progressWrap.hidden = true), streamError ? 8000 : 2000);
-
+    if (streamError) {
+      // Keep the error visible: an unreachable archive is not an empty sky.
+      progressText.textContent = `Stopped with an error after ${state.allFrames.length} frame(s): ${streamError.slice(0, 160)}`;
+      renderAnalysis(); // no analysis record is coming
+      return; // never cache an incomplete result
+    }
+    progressText.textContent = `Done: ${state.allFrames.length} frame(s)`;
+    setTimeout(() => (progressWrap.hidden = true), 2000);
 
     // Cache the whole set now that the stream is complete.
-    const serializable = state.frames.map((f) => ({ ...f, data: f.data.buffer.slice(0) }));
+    const serializable = state.allFrames.map(({ gapFilled, ...f }) => ({ ...f, data: f.data.buffer.slice(0) }));
     const approxBytes = serializable.reduce((s, f) => s + f.data.byteLength, 0);
+    if (state.analysis) serializable.push({ __analysis: state.analysis });
     window.SpherexCache.put(cacheKey, serializable, approxBytes);
     updateCacheStatus();
   }
 
-  function sortFrames() {
-    state.frames.sort((a, b) => a.groupIndex - b.groupIndex);
+  // ---------------------------------------------------------------------
+  // Detector series. Frames from different detectors sample very different
+  // wavelengths (0.75-5 um), so they are never blinked or differenced
+  // against each other: the viewer shows one detector series at a time
+  // (docs/AUDIT.md C1).
+  // ---------------------------------------------------------------------
+  function seriesKey(f) {
+    return (f.detectors || []).join("+") || "?";
   }
 
-  function sortAndShowFirst() {
-    sortFrames();
-    state.currentIndex = 0;
+  function rebuildDetectorOptions() {
+    const keys = [...new Set(state.allFrames.map(seriesKey))].sort();
+    const existing = Array.from(detectorViewSelect.options).map((o) => o.value);
+    if (keys.join("|") !== existing.join("|")) {
+      const previous = detectorViewSelect.value;
+      detectorViewSelect.innerHTML = "";
+      for (const k of keys) {
+        const opt = document.createElement("option");
+        opt.value = k;
+        detectorViewSelect.appendChild(opt);
+      }
+      if (keys.includes(previous)) detectorViewSelect.value = previous;
+    }
+    Array.from(detectorViewSelect.options).forEach((o) => {
+      o.textContent = `${o.value} (${state.allFrames.filter((f) => seriesKey(f) === o.value).length})`;
+    });
+  }
+
+  function applyDetectorFilter(keepCurrent) {
+    const shown = keepCurrent ? state.frames[state.currentIndex] : null;
+    const previousKey = detectorViewSelect.value;
+    rebuildDetectorOptions();
+    const key = detectorViewSelect.value;
+    state.frames = state.allFrames
+      .filter((f) => seriesKey(f) === key)
+      .sort((a, b) => a.timeMjdMean - b.timeMjdMean);
+    const idx = shown ? state.frames.indexOf(shown) : -1;
+    state.currentIndex = idx >= 0 ? idx : 0;
+    if (key !== previousKey || !keepCurrent) {
+      diffASlider.value = 0;
+      diffBSlider.value = Math.max(0, state.frames.length - 1);
+      state.selectedRank = null;
+    }
     updateFrameSlider();
+    renderAnalysis();
     renderView();
   }
+
+  detectorViewSelect.addEventListener("change", () => {
+    stopPlayback();
+    applyDetectorFilter(false);
+  });
 
   function updateFrameSlider() {
     const maxIdx = Math.max(0, state.frames.length - 1);
@@ -630,10 +827,14 @@
       state.globalFiniteValues = null;
       return;
     }
+    // Percentiles only need a representative sample; sorting every pixel of
+    // every frame on each update was O(N log N) per arriving frame.
+    const totalPixels = state.frames.reduce((acc, f) => acc + f.data.length, 0);
+    const stride = Math.max(1, Math.floor(totalPixels / 200000));
     const all = [];
     for (const f of state.frames) {
       const v = physicalValuesForFrame(f);
-      for (let i = 0; i < v.length; i++) if (Number.isFinite(v[i])) all.push(v[i]);
+      for (let i = 0; i < v.length; i += stride) if (Number.isFinite(v[i])) all.push(v[i]);
     }
     state.globalFiniteValues = all;
   }
@@ -661,10 +862,12 @@
       const vb = physicalValuesForFrame(b);
       const diff = new Float32Array(va.length);
       for (let i = 0; i < diff.length; i++) diff[i] = vb[i] - va[i]; // NaN propagates if either side is NaN
-      renderGrid(a.width, a.height, diff, { useGlobalAsinhLevels: false });
+      renderGrid(a.width, a.height, diff, { useGlobalAsinhLevels: false, frame: b, wcsFrame: a });
       frameLabel.textContent =
-        `Difference: epoch @ ${fmtDate(b.timeMjdMean)}  −  epoch @ ${fmtDate(a.timeMjdMean)}\n` +
-        `A moving/variable source shows as a dark/bright dipole pair.`;
+        `Difference (${seriesKey(a)}): ${fmtDate(b.timeMjdMean)}  −  ${fmtDate(a.timeMjdMean)}\n` +
+        `A mover shows as a dark/bright pair. Stationary bright stars also leave residuals (no PSF matching).`;
+    } else if (viewMode === "shiftstack") {
+      renderShiftStackView();
     } else if (viewMode === "sum") {
       const first = state.frames[0];
       const sum = new Float32Array(first.width * first.height);
@@ -680,17 +883,17 @@
       }
       const mean = new Float32Array(sum.length);
       for (let i = 0; i < sum.length; i++) mean[i] = count[i] > 0 ? sum[i] / count[i] : NaN;
-      renderGrid(first.width, first.height, mean, { useGlobalAsinhLevels: false });
-      frameLabel.textContent = `Sum of all ${state.frames.length} epoch(s) — a persistent faint source stands out; a mover smears out.`;
+      renderGrid(first.width, first.height, mean, { useGlobalAsinhLevels: false, frame: null, wcsFrame: first });
+      frameLabel.textContent = `Mean of all ${state.frames.length} ${seriesKey(first)} frame(s): a persistent faint source stands out, a mover smears out.`;
     } else {
       const frame = state.frames[state.currentIndex];
-      renderGrid(frame.width, frame.height, physicalValuesForFrame(frame), { useGlobalAsinhLevels: true });
+      renderGrid(frame.width, frame.height, physicalValuesForFrame(frame), { useGlobalAsinhLevels: true, frame, wcsFrame: frame });
       updateFrameLabel(frame);
     }
     updateContaminationSummary();
   }
-  function renderGrid(width, height, values, { useGlobalAsinhLevels = true } = {}) {
-    state.lastRenderedGrid = { width, height, values };
+  function renderGrid(width, height, values, { useGlobalAsinhLevels = true, frame = null, wcsFrame = null } = {}) {
+    state.lastRenderedGrid = { width, height, values, frame, wcsFrame };
     const mode = stretchSelect.value;
 
     // Asinh's levels come from every loaded frame combined (see
@@ -716,9 +919,14 @@
     const { black, white } = computeLevels(physValues, mode, blackPct, whitePct);
     const invert = invertCheckbox.checked;
 
+    // Array row 0 is the SOUTH edge of the field (grid cdelt2 > 0) and
+    // column 0 the EAST edge, so drawing array row (h-1-r) on display row r
+    // gives the standard north-up / east-left sky (docs/AUDIT.md C5).
     const rgba = new Uint8ClampedArray(width * height * 4);
     for (let i = 0; i < values.length; i++) {
-      const o = i * 4;
+      const ay = Math.floor(i / width);
+      const ax = i - ay * width;
+      const o = ((height - 1 - ay) * width + ax) * 4;
       if (!Number.isFinite(values[i])) {
         rgba[o + 3] = 0;
         continue;
@@ -737,12 +945,9 @@
     canvasCtx.putImageData(new ImageData(rgba, width, height), 0, 0);
     layoutCanvas();
 
-    // Crosshair on the target (always the grid centre, by construction):
-    // a CSS overlay at the stage centre (#crosshair in style.css) rather
-    // than strokes in the canvas, so it keeps a constant on-screen size at
-    // any zoom. Colour/gapped style still matches the planet-x renderer's
-    // blink.py (fill=(255,80,80)).
-    crosshair.hidden = false;
+    // The crosshair, the tracked-source markers and the compass are drawn
+    // by drawOverlay (called from layoutCanvas above), at screen resolution,
+    // so they keep a constant on-screen size at any zoom.
   }
 
   function updateContaminationSummary() {
@@ -757,9 +962,14 @@
       .sort((a, b) => b[1] - a[1])
       .slice(0, 5)
       .map(([name, count]) => `${name} (${count}px)`);
-    contaminationSummary.textContent = parts.length
-      ? `Flagged in this frame: ${parts.join(", ")}`
-      : "No notable flags in this frame.";
+    const ph = state.frames[state.currentIndex].photometry;
+    const phStr = ph
+      ? ph.status === "ok"
+        ? ` Target aperture: ${fmtFlux(ph.flux_mjy)} ± ${fmtFlux(ph.flux_err_mjy)} mJy (S/N ${ph.snr.toFixed(1)}; statistical error only; frames of a constant star differ by ~3-5%).`
+        : ` Target aperture: not measured (${ph.status.replace(/_/g, " ")}).`
+      : "";
+    contaminationSummary.textContent =
+      (parts.length ? `Flagged pixels in this frame's cutouts (whole field): ${parts.join(", ")}.` : "No notable flags in this frame.") + phStr;
   }
 
   function updateFrameLabel(frame) {
@@ -784,62 +994,84 @@
   }
 
   // ---------------------------------------------------------------------
-  // Light curve: flux at the target pixel vs time (Phase 3).
-  //
-  // This reads the single pixel at the grid centre, which by construction
-  // (app/pipeline.py's make_target_wcs) is always the target position —
-  // it is NOT aperture or PSF photometry (that's the Phase 4 bonus
-  // feature), so a few mis-centred or noisy pixels can swing it. Good
-  // enough to catch an obviously variable star like RW Aurigae or R
-  // Draconis; not a substitute for real photometry.
+  // Light curve: background-subtracted aperture flux (mJy, +-1 sigma) at the
+  // target's predicted position in each frame of the CURRENT detector
+  // series, computed server-side (app/photometry.py) before any display
+  // hole-filling. Frames where the measurement was refused (masked or
+  // saturated aperture, off-image) are drawn hollow on the baseline, never
+  // given an invented value.
   // ---------------------------------------------------------------------
-  function centrePixelFlux(frame) {
-    const cx = Math.floor(frame.width / 2);
-    const cy = Math.floor(frame.height / 2);
-    const raw = frame.data[cy * frame.width + cx];
-    return raw === INVALID_SENTINEL ? NaN : raw * frame.scale + frame.offset;
+  function fmtFlux(v) {
+    if (v == null || !Number.isFinite(v)) return "?";
+    const a = Math.abs(v);
+    return a >= 100 ? v.toFixed(0) : a >= 1 ? v.toFixed(2) : v.toPrecision(2);
   }
 
   function drawLightCurve() {
     const w = lightcurveCanvas.width;
     const h = lightcurveCanvas.height;
     lightcurveCtx.clearRect(0, 0, w, h);
+    lightcurveCtx.font = '12px "Almendra", Georgia, serif';
     if (state.frames.length === 0) return;
 
-    const points = state.frames.map((f, i) => ({ t: f.timeMjdMean, flux: centrePixelFlux(f), i }));
-    const finitePoints = points.filter((p) => Number.isFinite(p.flux));
-    if (finitePoints.length === 0) {
-      lightcurveCtx.fillStyle = "#8b96ab";
-      lightcurveCtx.fillText("No valid flux at the target pixel in any frame.", 10, h / 2);
+    const points = state.frames.map((f, i) => {
+      const ph = f.photometry;
+      const ok = ph && ph.status === "ok" && Number.isFinite(ph.flux_mjy);
+      return {
+        t: f.timeMjdMean,
+        flux: ok ? ph.flux_mjy : NaN,
+        err: ok ? ph.flux_err_mjy || 0 : 0,
+        status: ph ? ph.status : "unavailable",
+        i,
+      };
+    });
+    const good = points.filter((p) => Number.isFinite(p.flux));
+    if (good.length === 0) {
+      lightcurveCtx.fillStyle = "#8f8160";
+      const reasons = [...new Set(points.map((p) => p.status))].join(", ").replace(/_/g, " ");
+      lightcurveCtx.fillText(`No valid aperture measurement of the target in this detector series (${reasons}).`, 10, h / 2);
       return;
     }
 
+    const padL = 56, padR = 12, padT = 10, padB = 18;
     const tMin = Math.min(...points.map((p) => p.t));
-    const tMax = Math.max(...points.map((p) => p.t)) || tMin + 1;
-    const fluxMin = Math.min(...finitePoints.map((p) => p.flux));
-    const fluxMax = Math.max(...finitePoints.map((p) => p.flux));
-    const pad = 16;
-    const xOf = (t) => pad + ((t - tMin) / (tMax - tMin || 1)) * (w - 2 * pad);
-    const yOf = (f) => h - pad - ((f - fluxMin) / (fluxMax - fluxMin || 1)) * (h - 2 * pad);
+    const tMax = Math.max(...points.map((p) => p.t));
+    const lo = Math.min(...good.map((p) => p.flux - p.err));
+    const hi = Math.max(...good.map((p) => p.flux + p.err));
+    const span = hi - lo || Math.abs(hi) || 1;
+    const fMin = lo - 0.08 * span;
+    const fMax = hi + 0.08 * span;
+    const xOf = (t) => padL + ((t - tMin) / (tMax - tMin || 1)) * (w - padL - padR);
+    const yOf = (f) => h - padB - ((f - fMin) / (fMax - fMin || 1)) * (h - padT - padB);
 
-    lightcurveCtx.strokeStyle = "#5fb0ff";
-    lightcurveCtx.lineWidth = 1.5;
-    lightcurveCtx.beginPath();
-    finitePoints.forEach((p, idx) => {
-      const x = xOf(p.t);
-      const y = yOf(p.flux);
-      if (idx === 0) lightcurveCtx.moveTo(x, y);
-      else lightcurveCtx.lineTo(x, y);
-    });
-    lightcurveCtx.stroke();
+    lightcurveCtx.fillStyle = "#8f8160";
+    lightcurveCtx.fillText(`${fmtFlux(fMax)} mJy`, 2, padT + 8);
+    lightcurveCtx.fillText(`${fmtFlux(fMin)} mJy`, 2, h - padB);
+    lightcurveCtx.fillText(fmtDate(tMin), padL, h - 4);
+    const lastLabel = fmtDate(tMax);
+    lightcurveCtx.fillText(lastLabel, w - padR - lightcurveCtx.measureText(lastLabel).width, h - 4);
 
     for (const p of points) {
       const x = xOf(p.t);
-      const y = Number.isFinite(p.flux) ? yOf(p.flux) : h - pad;
       const isCurrent = viewModeSelect.value === "blink" && p.i === state.currentIndex;
-      lightcurveCtx.fillStyle = Number.isFinite(p.flux) ? (isCurrent ? "#ffb454" : "#5fb0ff") : "#555";
+      if (!Number.isFinite(p.flux)) {
+        lightcurveCtx.strokeStyle = "#6b6048";
+        lightcurveCtx.lineWidth = 1;
+        lightcurveCtx.beginPath();
+        lightcurveCtx.arc(x, h - padB, isCurrent ? 5 : 3.5, 0, 2 * Math.PI);
+        lightcurveCtx.stroke();
+        continue;
+      }
+      const color = isCurrent ? "#f3dc9a" : "#8b9bea";
+      lightcurveCtx.strokeStyle = color;
+      lightcurveCtx.lineWidth = 1;
       lightcurveCtx.beginPath();
-      lightcurveCtx.arc(x, y, isCurrent ? 4 : 2.5, 0, 2 * Math.PI);
+      lightcurveCtx.moveTo(x, yOf(p.flux - p.err));
+      lightcurveCtx.lineTo(x, yOf(p.flux + p.err));
+      lightcurveCtx.stroke();
+      lightcurveCtx.fillStyle = color;
+      lightcurveCtx.beginPath();
+      lightcurveCtx.arc(x, yOf(p.flux), isCurrent ? 4 : 3, 0, 2 * Math.PI);
       lightcurveCtx.fill();
     }
   }
@@ -851,24 +1083,48 @@
    * currently-rendered grid, or null if the cursor is outside it / there's
    * nothing rendered yet. Shared by the hover readout and the spectrum
    * click handler below. */
+  /** FITS TAN (gnomonic) pixel -> world for the grid WCS the backend sends
+   * with every frame. x, y are 0-based ARRAY indices. These grids carry no
+   * SIP terms. Checked in the browser against astropy's
+   * WCS.pixel_to_world on make_target_wcs grids (2026-11-15). */
+  function gridPixelToWorld(wcs, x, y) {
+    const D = Math.PI / 180;
+    const xi = (x + 1 - wcs.crpix[0]) * wcs.cdelt[0] * D;
+    const eta = (y + 1 - wcs.crpix[1]) * wcs.cdelt[1] * D;
+    const d0 = wcs.crval[1] * D;
+    const denom = Math.cos(d0) - eta * Math.sin(d0);
+    let ra = wcs.crval[0] + Math.atan2(xi, denom) / D;
+    const dec = Math.atan2(Math.sin(d0) + eta * Math.cos(d0), Math.hypot(xi, denom)) / D;
+    ra = ((ra % 360) + 360) % 360;
+    return { ra, dec };
+  }
+
+  function angularSepArcsec(ra1, dec1, ra2, dec2) {
+    const D = Math.PI / 180;
+    const hav =
+      Math.sin(((dec2 - dec1) * D) / 2) ** 2 +
+      Math.cos(dec1 * D) * Math.cos(dec2 * D) * Math.sin(((ra2 - ra1) * D) / 2) ** 2;
+    return (2 * Math.asin(Math.sqrt(hav)) * 180 * 3600) / Math.PI;
+  }
+
+  /** Map a mouse event on #viewer-canvas to the rendered grid. The display
+   * is north-up (array rows flipped), see renderGrid. */
   function pixelAtEvent(ev) {
     const grid = state.lastRenderedGrid;
-    if (!grid || !state.resolvedCoord) return null;
+    if (!grid) return null;
     const rect = canvas.getBoundingClientRect();
     const canvasX = ((ev.clientX - rect.left) / rect.width) * canvas.width;
     const canvasY = ((ev.clientY - rect.top) / rect.height) * canvas.height;
     const px = Math.floor(canvasX); // canvas pixels are grid pixels (see renderGrid)
     const py = Math.floor(canvasY);
     if (px < 0 || py < 0 || px >= grid.width || py >= grid.height) return null;
-
-    const pixelScaleArcsec = (state.fovArcmin * 60) / grid.width;
-    const dx = (px - grid.width / 2) * pixelScaleArcsec;
-    const dy = (grid.height / 2 - py) * pixelScaleArcsec;
-    const decRad = (state.resolvedCoord.dec * Math.PI) / 180;
-    const ra = state.resolvedCoord.ra - dx / 3600 / Math.cos(decRad);
-    const dec = state.resolvedCoord.dec + dy / 3600;
-    const phys = grid.values[py * grid.width + px];
-    return { px, py, ra, dec, phys };
+    const ax = px;
+    const ay = grid.height - 1 - py;
+    const idx = ay * grid.width + ax;
+    const wcsFrame = grid.wcsFrame;
+    const world = wcsFrame && wcsFrame.gridWcs ? gridPixelToWorld(wcsFrame.gridWcs, ax, ay) : null;
+    const interpolated = !!(grid.frame && grid.frame.gapFilled && grid.frame.gapFilled.has(idx));
+    return { ax, ay, ra: world ? world.ra : NaN, dec: world ? world.dec : NaN, phys: grid.values[idx], interpolated };
   }
 
   canvas.addEventListener("mousemove", (ev) => {
@@ -877,9 +1133,11 @@
       pixelReadout.textContent = "";
       return;
     }
-    pixelReadout.textContent = Number.isFinite(hit.phys)
-      ? `RA ${hit.ra.toFixed(5)}  Dec ${hit.dec.toFixed(5)}   flux ${hit.phys.toFixed(4)} MJy/sr`
-      : `RA ${hit.ra.toFixed(5)}  Dec ${hit.dec.toFixed(5)}   no data`;
+    const pos = Number.isFinite(hit.ra) ? `RA ${hit.ra.toFixed(5)}  Dec ${hit.dec.toFixed(5)}` : "(no WCS - reload)";
+    const val = Number.isFinite(hit.phys)
+      ? `${hit.phys.toFixed(4)} MJy/sr${hit.interpolated ? " (interpolated for display, not data)" : ""}`
+      : "no data";
+    pixelReadout.textContent = `${pos}   surface brightness ${val}`;
   });
   canvas.addEventListener("mouseleave", () => (pixelReadout.textContent = ""));
 
@@ -888,23 +1146,46 @@
   // ---------------------------------------------------------------------
   canvas.addEventListener("click", (ev) => {
     const hit = pixelAtEvent(ev);
-    if (!hit) return;
-    fetchAndDrawSpectrum(hit.ra, hit.dec);
+    if (!hit || !Number.isFinite(hit.ra)) return;
+    // If the click is on the target's predicted position and the target has
+    // a known proper motion, ask the backend to resolve the TARGET (so it
+    // propagates the position to every exposure's own epoch). Otherwise
+    // measure the fixed clicked position.
+    let track = false;
+    const f = state.lastRenderedGrid.frame;
+    if (state.resolved && state.resolved.has_proper_motion && f && f.targetPixel && f.gridWcs) {
+      const t = gridPixelToWorld(f.gridWcs, f.targetPixel.x, f.targetPixel.y);
+      track = angularSepArcsec(hit.ra, hit.dec, t.ra, t.dec) <= TRACK_CLICK_RADIUS_ARCSEC;
+    }
+    fetchAndDrawSpectrum(hit.ra, hit.dec, track);
   });
 
-  async function fetchAndDrawSpectrum(ra, dec) {
-    spectrumStatus.textContent = "Fetching spectrum from IRSA (re-queries all 6 detectors — this takes a while)…";
+  async function fetchAndDrawSpectrum(ra, dec, track) {
+    const what = track
+      ? `${state.resolved.name || state.query} (following its proper motion)`
+      : `RA ${ra.toFixed(5)}, Dec ${dec.toFixed(5)}`;
+    spectrumStatus.textContent = `Fetching spectrum for ${what} from IRSA (all 6 detectors, capped exposures, so this is slow)…`;
     spectrumCtx.clearRect(0, 0, spectrumCanvas.width, spectrumCanvas.height);
     try {
-      const url = `${API_BASE}/api/spectrum?position=${ra.toFixed(6)},${dec.toFixed(6)}&fov=${state.fovArcmin}`;
+      const position = track ? state.query : `${ra.toFixed(6)} ${dec.toFixed(6)}`;
+      // A clicked sky position is a fixed position: never let the backend
+      // swap it for a catalogued mover (pm_lookup only when following the target).
+      const url = `${API_BASE}/api/spectrum?position=${encodeURIComponent(position)}&fov=${Math.min(state.fovArcmin, 3)}&pm_lookup=${track ? "true" : "false"}`;
       const resp = await fetch(url);
       if (!resp.ok) throw new Error(`server error (${resp.status})`);
-      const points = await resp.json();
+      const body = await resp.json();
+      const points = body.points || [];
       drawSpectrum(points);
-      const nGood = points.filter((p) => p.flux != null).length;
-      spectrumStatus.textContent = nGood
-        ? `${nGood} of ${points.length} exposure(s) usable at RA ${ra.toFixed(4)}, Dec ${dec.toFixed(4)}.`
-        : `No unmasked flux found at RA ${ra.toFixed(4)}, Dec ${dec.toFixed(4)} — too faint, or always flagged.`;
+      const ok = points.filter((p) => p.status === "ok" && p.flux_mjy != null);
+      const byStatus = {};
+      points.forEach((p) => (byStatus[p.status] = (byStatus[p.status] || 0) + 1));
+      const refused = Object.entries(byStatus)
+        .filter(([k]) => k !== "ok")
+        .map(([k, n]) => `${n} ${k.replace(/_/g, " ")}`)
+        .join(", ");
+      spectrumStatus.textContent = ok.length
+        ? `${ok.length} of ${points.length} exposure(s) measured for ${what}${refused ? `; refused: ${refused}` : ""}. Colour = date (blue early → red late).`
+        : `No usable aperture measurement for ${what}${refused ? ` (${refused})` : ""}.`;
     } catch (e) {
       spectrumStatus.textContent = `Spectrum failed: ${e.message}`;
     }
@@ -914,27 +1195,555 @@
     const w = spectrumCanvas.width;
     const h = spectrumCanvas.height;
     spectrumCtx.clearRect(0, 0, w, h);
-    const good = points.filter((p) => p.flux != null && p.wavelength_um != null);
+    const good = points.filter((p) => p.status === "ok" && p.flux_mjy != null && p.wavelength_um != null);
     if (good.length === 0) return;
 
     const wMin = Math.min(...good.map((p) => p.wavelength_um));
     const wMax = Math.max(...good.map((p) => p.wavelength_um));
-    const fMin = Math.min(...good.map((p) => p.flux));
-    const fMax = Math.max(...good.map((p) => p.flux));
+    const lo = Math.min(...good.map((p) => p.flux_mjy - (p.flux_err_mjy || 0)));
+    const hi = Math.max(...good.map((p) => p.flux_mjy + (p.flux_err_mjy || 0)));
     const tMin = Math.min(...good.map((p) => p.time_mjd));
-    const tMax = Math.max(...good.map((p) => p.time_mjd)) || tMin + 1;
-    const pad = 14;
-    const xOf = (wl) => pad + ((wl - wMin) / (wMax - wMin || 1)) * (w - 2 * pad);
-    const yOf = (f) => h - pad - ((f - fMin) / (fMax - fMin || 1)) * (h - 2 * pad);
+    const tMax = Math.max(...good.map((p) => p.time_mjd));
+    const padL = 34;
+    const pad = 12;
+    const xOf = (wl) => padL + ((wl - wMin) / (wMax - wMin || 1)) * (w - padL - pad);
+    const yOf = (f) => h - pad - ((f - lo) / (hi - lo || 1)) * (h - 2 * pad);
+
+    spectrumCtx.font = '11px "Almendra", Georgia, serif';
+    spectrumCtx.fillStyle = "#8f8160";
+    spectrumCtx.fillText(fmtFlux(hi), 1, pad);
+    spectrumCtx.fillText(fmtFlux(lo), 1, h - pad);
+    spectrumCtx.fillText("mJy", 1, h / 2);
+    spectrumCtx.fillText(`${wMin.toFixed(2)} µm`, padL, h - 1);
+    const lbl = `${wMax.toFixed(2)} µm`;
+    spectrumCtx.fillText(lbl, w - pad - spectrumCtx.measureText(lbl).width, h - 1);
 
     for (const p of good) {
-      // Coloured by epoch (time), per the brief: blue (early) -> red (late).
       const hue = 220 - 220 * ((p.time_mjd - tMin) / (tMax - tMin || 1));
-      spectrumCtx.fillStyle = `hsl(${hue}, 80%, 60%)`;
+      const color = `hsl(${hue}, 80%, 60%)`;
+      const x = xOf(p.wavelength_um);
+      spectrumCtx.strokeStyle = color;
+      spectrumCtx.lineWidth = 1;
       spectrumCtx.beginPath();
-      spectrumCtx.arc(xOf(p.wavelength_um), yOf(p.flux), 2.5, 0, 2 * Math.PI);
+      spectrumCtx.moveTo(x, yOf(p.flux_mjy - (p.flux_err_mjy || 0)));
+      spectrumCtx.lineTo(x, yOf(p.flux_mjy + (p.flux_err_mjy || 0)));
+      spectrumCtx.stroke();
+      spectrumCtx.fillStyle = color;
+      spectrumCtx.beginPath();
+      spectrumCtx.arc(x, yOf(p.flux_mjy), 2.2, 0, 2 * Math.PI);
       spectrumCtx.fill();
     }
+  }
+
+  // ---------------------------------------------------------------------
+  // Tracked sources: detection / tracking / catalogue match / ranking from
+  // the backend's end-of-stream analysis record (app/discovery.py), plus
+  // volunteer classification (app/store.py).
+  //
+  // Wording rule for everything shown here: a "candidate" is something for
+  // a person to look at. Nothing in this panel says an object is new.
+  // ---------------------------------------------------------------------
+  const analysisStatus = $("analysis-status");
+  const analysisTableBody = $("analysis-table-body");
+  const analysisDetail = $("analysis-detail");
+  const showTracksCheckbox = $("show-tracks-checkbox");
+  const exportJsonBtn = $("export-json-btn");
+  const exportCsvBtn = $("export-csv-btn");
+
+  const VOTE_LABELS = [
+    ["moving", "Moving source"],
+    ["variable", "Variable source"],
+    ["stationary", "Stationary source"],
+    ["artifact", "Potential artifact"],
+    ["uncertain", "Uncertain"],
+  ];
+
+  function voterToken() {
+    // Anonymous random token so one browser counts as one volunteer.
+    let token = null;
+    try {
+      token = localStorage.getItem("spherex-voter");
+    } catch (e) {
+      /* storage unavailable: fall through to a per-page token */
+    }
+    if (!token) {
+      const bytes = new Uint8Array(12);
+      crypto.getRandomValues(bytes);
+      token = "v-" + Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+      try {
+        localStorage.setItem("spherex-voter", token);
+      } catch (e) {
+        /* keep the in-memory token */
+      }
+    }
+    voterToken = () => token;
+    return token;
+  }
+
+  function currentSeriesAnalysis() {
+    if (!state.analysis || !state.analysis.series) return null;
+    return state.analysis.series.find((s) => s.series === detectorViewSelect.value) || null;
+  }
+
+  function selectedTrack() {
+    const series = currentSeriesAnalysis();
+    if (!series || state.selectedRank == null) return null;
+    return series.tracks.find((t) => t.rank === state.selectedRank) || null;
+  }
+
+  function el(tag, text, className) {
+    const node = document.createElement(tag);
+    if (text != null) node.textContent = text;
+    if (className) node.className = className;
+    return node;
+  }
+
+  function fmtPm(track) {
+    const m = track.motion;
+    if (!m || m.pm_total_mas_yr == null) return "—";
+    return `${(m.pm_total_mas_yr / 1000).toFixed(2)} ± ${(m.pmra_err_mas_yr / 1000).toFixed(2)}″/yr (${m.pm_significance.toFixed(1)}σ)`;
+  }
+
+  function fmtCatalog(track) {
+    const parts = [];
+    for (const [key, name] of [["gaia", "Gaia"], ["catwise", "CatWISE"]]) {
+      const m = track[key];
+      if (!m) continue;
+      if (m.status === "matched") parts.push(`${name} ✓`);
+      else if (m.status === "ambiguous") parts.push(`${name} ? (${m.n_in_gate})`);
+      else if (m.status === "unmatched") parts.push(`${name} –`);
+      else parts.push(`${name} n/a`);
+    }
+    return parts.join("  ");
+  }
+
+  function renderAnalysis() {
+    analysisTableBody.innerHTML = "";
+    analysisDetail.innerHTML = "";
+    const a = state.analysis;
+    const shownSeries = currentSeriesAnalysis();
+    sourcesBtn.textContent = shownSeries ? `Sources (${shownSeries.tracks.length})` : "Sources";
+    exportJsonBtn.disabled = exportCsvBtn.disabled = !a;
+    if (!a) {
+      analysisStatus.textContent = state.allFrames.length
+        ? "Analysis runs after the last frame arrives…"
+        : "";
+      return;
+    }
+    if (a.error) {
+      analysisStatus.textContent = `Analysis failed: ${a.error}`;
+      return;
+    }
+    const series = currentSeriesAnalysis();
+    if (!series) {
+      analysisStatus.textContent = "No analysis for this detector series.";
+      return;
+    }
+    const reg = series.registration || [];
+    const checked = reg.filter((r) => r.applied).length;
+    const notes = [];
+    notes.push(`${series.tracks.length} source(s) tracked across ${series.n_frames} frame(s) of ${series.series}.`);
+    notes.push(
+      checked === reg.length && reg.length
+        ? "Image registration checked against Gaia stars in every frame."
+        : `Image registration could be checked against Gaia stars in ${checked} of ${reg.length} frame(s) (needs 3 isolated stars).`
+    );
+    if (series.n_frames < 2) notes.push("Only one frame: no motion or variability can be measured.");
+    if (series.warning) notes.push(series.warning);
+    if (a.catalog_errors && a.catalog_errors.length) notes.push(`Catalogue problem: ${a.catalog_errors.join("; ")}`);
+    if (a.store_error) notes.push(`Classification storage unavailable: ${a.store_error}`);
+    notes.push("Ranked by anomaly score (0–1: weighted motion, variability, missing catalogue counterpart). It is not a probability, and no object type is estimated.");
+    analysisStatus.textContent = notes.join(" ");
+
+    for (const t of series.tracks) {
+      const tr = document.createElement("tr");
+      if (t.rank === state.selectedRank) tr.className = "selected";
+      const labelCell = el("td", t.label);
+      labelCell.style.color = LABEL_COLORS[t.label] || "";
+      tr.appendChild(el("td", String(t.rank)));
+      tr.appendChild(labelCell);
+      tr.appendChild(el("td", t.anomaly_score.toFixed(2)));
+      tr.appendChild(el("td", t.reliability));
+      tr.appendChild(el("td", t.detection_snr_median.toFixed(0)));
+      tr.appendChild(el("td", `${t.n_epochs}/${t.n_frames_in_series}`));
+      tr.appendChild(el("td", fmtPm(t)));
+      const v = t.variability;
+      tr.appendChild(el("td", v && v.p_value != null ? `p=${v.p_value.toExponential(0)}${v.wavelength_mismatch ? " λ≠" : ""}` : "—"));
+      tr.appendChild(el("td", fmtCatalog(t)));
+      tr.appendChild(el("td", `${t.ra_deg.toFixed(5)} ${t.dec_deg >= 0 ? "+" : ""}${t.dec_deg.toFixed(5)}`));
+      tr.addEventListener("click", () => {
+        state.selectedRank = state.selectedRank === t.rank ? null : t.rank;
+        renderAnalysis();
+        renderView();
+      });
+      analysisTableBody.appendChild(tr);
+    }
+    renderAnalysisDetail();
+    renderShiftStackPanel();
+  }
+
+  function renderAnalysisDetail() {
+    analysisDetail.innerHTML = "";
+    const t = selectedTrack();
+    if (!t) {
+      analysisDetail.appendChild(el("p", "Select a row to see why it was ranked there, its catalogue matches, and to classify it.", "status-text"));
+      return;
+    }
+    analysisDetail.appendChild(el("h3", `#${t.rank} · ${t.label} · anomaly ${t.anomaly_score.toFixed(2)} · reliability ${t.reliability} · detection S/N ${t.detection_snr_median.toFixed(0)}`));
+
+    const why = el("div");
+    why.appendChild(el("strong", "Why it is ranked here"));
+    const ul = el("ul");
+    (t.reasons.length ? t.reasons : ["Nothing unusual measured."]).forEach((r) => ul.appendChild(el("li", r)));
+    why.appendChild(ul);
+    analysisDetail.appendChild(why);
+
+    // --- astrometry: linear fit (reported) and parallax-aware fit (shown, not adopted unless constrained) ---
+    const ast = el("div");
+    ast.appendChild(el("strong", "Astrometry"));
+    const al = el("ul");
+    const m = t.motion;
+    if (m && m.pmra_mas_yr != null) {
+      al.appendChild(el("li",
+        `Proper motion (linear fit, the reported result): east ${m.pmra_mas_yr.toFixed(0)}, north ${m.pmdec_mas_yr.toFixed(0)} ± ${m.pmra_err_mas_yr.toFixed(0)} mas/yr ` +
+        `(${m.pm_significance.toFixed(1)}σ from zero; χ² ${fmtNum(m.chi2, 1)} for ${m.dof} degrees of freedom` +
+        `${m.errors_rescaled ? "; errors scaled up because the fit is worse than the position errors predict" : ""}).`));
+    } else {
+      al.appendChild(el("li", "No proper motion: seen in fewer than two epochs."));
+    }
+    const p = t.parallax_fit;
+    if (!p) {
+      al.appendChild(el("li", "Parallax-aware fit not run (needs at least 3 epochs)."));
+    } else if (p.constrained) {
+      al.appendChild(el("li",
+        `Parallax (5-parameter fit, constrained): ${p.parallax_mas.toFixed(0)} ± ${p.parallax_err_mas.toFixed(0)} mas; ` +
+        `motion (${p.pmra_mas_yr.toFixed(0)}, ${p.pmdec_mas_yr.toFixed(0)}) ± ${p.pmra_err_mas_yr.toFixed(0)} mas/yr.`));
+    } else {
+      const item = el("li");
+      item.appendChild(el("span", "UNCONSTRAINED", "badge badge-dim"));
+      item.appendChild(document.createTextNode(
+        ` Parallax-aware fit: ${p.parallax_mas.toFixed(0)} ± ${p.parallax_err_mas.toFixed(0)} mas is not a measurement (${p.reason}). ` +
+        `The linear proper-motion fit above remains the reported result. ` +
+        `(${p.n_epochs} epochs, ${p.dof} degree(s) of freedom; ${Math.round(100 * p.factor_independence)}% of the parallax signal is distinguishable from linear motion.)`));
+      al.appendChild(item);
+    }
+    ast.appendChild(al);
+    analysisDetail.appendChild(ast);
+
+    if (t.caveats.length) {
+      const cav = el("div");
+      cav.appendChild(el("strong", "Reasons for caution"));
+      const cl = el("ul");
+      t.caveats.forEach((c) => cl.appendChild(el("li", c)));
+      cav.appendChild(cl);
+      analysisDetail.appendChild(cav);
+    }
+
+    const cat = el("div");
+    cat.appendChild(el("strong", "Catalogue comparison (positions propagated to the observation epoch)"));
+    const catList = el("ul");
+    for (const [key, name] of [["gaia", "Gaia DR3"], ["catwise", "CatWISE2020"]]) {
+      const m = t[key];
+      if (!m) continue;
+      let text;
+      if (m.status === "catalog_unavailable") text = `${name}: query failed, not compared.`;
+      else if (m.status === "unmatched") text = `${name}: no source inside the positional uncertainty (unmatched).`;
+      else {
+        const s = m.source;
+        const pm = s.pmra_mas_yr != null ? `, PM (${s.pmra_mas_yr.toFixed(0)}, ${s.pmdec_mas_yr.toFixed(0)}) mas/yr` : ", no PM";
+        const plx = s.parallax_mas != null ? `, parallax ${s.parallax_mas.toFixed(1)} mas` : "";
+        const mags = Object.entries(s.mags || {}).map(([k, v]) => `${k}=${v.toFixed(2)}`).join(" ");
+        text = `${name}: ${s.source_id}, ${m.separation_arcsec.toFixed(2)}″ away (${m.normalized_separation.toFixed(1)}σ)${pm}${plx}${mags ? ", " + mags : ""}${m.status === "ambiguous" ? ` (${m.n_in_gate} sources fit, not unique)` : ""}.`;
+      }
+      catList.appendChild(el("li", text));
+    }
+    cat.appendChild(catList);
+    analysisDetail.appendChild(cat);
+
+    const dets = t.detections
+      .map((d) => `${fmtDate(d.time_mjd)}: ${d.phot_status === "ok" ? `${fmtFlux(d.flux_mjy)} ± ${fmtFlux(d.flux_err_mjy)} mJy` : d.phot_status.replace(/_/g, " ")} @ ${d.wavelength_um != null ? d.wavelength_um.toFixed(2) + " µm" : "?"}`)
+      .join("   ·   ");
+    analysisDetail.appendChild(el("p", `Per-frame aperture flux: ${dets}`, "status-text"));
+
+    // --- volunteer classification ---
+    const voteBox = el("div", null, "vote-box");
+    voteBox.appendChild(el("strong", "Your classification"));
+    if (!t.candidate_id) {
+      voteBox.appendChild(el("p", "This source was not stored (only the top-ranked sources per series are), so it cannot be classified.", "status-text"));
+    } else {
+      const buttons = el("div", null, "vote-buttons");
+      const agreement = el("p", "Loading classifications…", "status-text");
+      const showAgreement = (info, mine) => {
+        const c = info.classifications || info;
+        const counts = VOTE_LABELS.filter(([k]) => c.counts[k]).map(([k, name]) => `${name}: ${c.counts[k]}`).join(", ");
+        agreement.textContent = c.n_voters
+          ? `${c.n_voters} volunteer(s). ${counts}. Agreement on the most common label: ${(100 * c.agreement_fraction).toFixed(0)}%. This shows how people voted, not what the object is.`
+          : "No classifications yet.";
+        Array.from(buttons.children).forEach((b) => b.classList.toggle("chosen", b.dataset.label === mine));
+      };
+      for (const [key, name] of VOTE_LABELS) {
+        const b = el("button", name, "text-btn");
+        b.type = "button";
+        b.dataset.label = key;
+        b.addEventListener("click", async () => {
+          try {
+            const resp = await fetch(`${API_BASE}/api/candidates/${t.candidate_id}/classifications`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ label: key, voter: voterToken() }),
+            });
+            if (!resp.ok) throw new Error(`server error (${resp.status})`);
+            const body = await resp.json();
+            showAgreement(body, body.your_label);
+          } catch (e) {
+            agreement.textContent = `Could not save your classification: ${e.message}`;
+          }
+        });
+        buttons.appendChild(b);
+      }
+      voteBox.appendChild(buttons);
+      voteBox.appendChild(agreement);
+      fetch(`${API_BASE}/api/candidates/${t.candidate_id}?voter=${encodeURIComponent(voterToken())}`)
+        .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`server error (${r.status})`))))
+        .then((body) => showAgreement(body, body.your_label))
+        .catch((e) => (agreement.textContent = `Could not load classifications: ${e.message}`));
+    }
+    analysisDetail.appendChild(voteBox);
+  }
+
+  function downloadText(filename, text, mime) {
+    const url = URL.createObjectURL(new Blob([text], { type: mime }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function exportName(ext) {
+    const base = (state.query || "field").replace(/[^A-Za-z0-9+_.-]+/g, "_").slice(0, 60);
+    return `spherex_sources_${base}.${ext}`;
+  }
+
+  exportJsonBtn.addEventListener("click", () => {
+    if (!state.analysis) return;
+    const payload = { query: state.query, resolved: state.resolved, fov_arcmin: state.fovArcmin, releases: state.releaseTag, analysis: state.analysis };
+    downloadText(exportName("json"), JSON.stringify(payload, null, 2), "application/json");
+  });
+
+  exportCsvBtn.addEventListener("click", () => {
+    if (!state.analysis) return;
+    const cols = [
+      "series", "rank", "label", "anomaly_score", "reliability", "detection_snr_median", "n_epochs", "ra_deg", "dec_deg", "epoch_mjd",
+      "pos_err_arcsec", "pmra_mas_yr", "pmdec_mas_yr", "pm_err_mas_yr", "pm_significance",
+      "parallax_fit_mas", "parallax_fit_err_mas", "parallax_constrained", "mean_flux_mjy", "variability_p_value",
+      "wavelength_mismatch", "gaia_status", "gaia_source_id", "gaia_separation_arcsec", "catwise_status", "catwise_source_id",
+      "catwise_separation_arcsec", "flags", "reasons", "caveats", "candidate_id",
+    ];
+    const quote = (v) => (v == null ? "" : /[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : String(v));
+    const lines = [cols.join(",")];
+    for (const s of state.analysis.series || []) {
+      for (const t of s.tracks) {
+        const row = {
+          series: t.series, rank: t.rank, label: t.label, anomaly_score: t.anomaly_score, reliability: t.reliability,
+          detection_snr_median: t.detection_snr_median, n_epochs: t.n_epochs, ra_deg: t.ra_deg, dec_deg: t.dec_deg, epoch_mjd: t.epoch_mjd,
+          pos_err_arcsec: t.pos_err_arcsec, pmra_mas_yr: t.motion.pmra_mas_yr, pmdec_mas_yr: t.motion.pmdec_mas_yr,
+          pm_err_mas_yr: t.motion.pmra_err_mas_yr, pm_significance: t.motion.pm_significance,
+          parallax_fit_mas: t.parallax_fit ? t.parallax_fit.parallax_mas : "",
+          parallax_fit_err_mas: t.parallax_fit ? t.parallax_fit.parallax_err_mas : "",
+          parallax_constrained: t.parallax_fit ? t.parallax_fit.constrained : "",
+          mean_flux_mjy: t.variability.mean_flux_mjy, variability_p_value: t.variability.p_value,
+          wavelength_mismatch: t.variability.wavelength_mismatch,
+          gaia_status: t.gaia.status, gaia_source_id: t.gaia.source ? t.gaia.source.source_id : "",
+          gaia_separation_arcsec: t.gaia.separation_arcsec,
+          catwise_status: t.catwise.status, catwise_source_id: t.catwise.source ? t.catwise.source.source_id : "",
+          catwise_separation_arcsec: t.catwise.separation_arcsec,
+          flags: t.flags.join("|"), reasons: t.reasons.join(" | "), caveats: t.caveats.join(" | "), candidate_id: t.candidate_id || "",
+        };
+        lines.push(cols.map((c) => quote(row[c])).join(","));
+      }
+    }
+    downloadText(exportName("csv"), lines.join("\n"), "text/csv");
+  });
+
+  showTracksCheckbox.addEventListener("change", renderView);
+
+  // ---------------------------------------------------------------------
+  // Shift-and-stack (app/stream.py: run_shift_stack). Optional; requested
+  // with the "Shift-and-stack search" checkbox. A search technique: the
+  // panel says so and never calls a result a confirmation.
+  // ---------------------------------------------------------------------
+  const shiftstackPanel = $("shiftstack-panel");
+
+  function fmtNum(v, digits = 1) {
+    return v == null || !Number.isFinite(v) ? "—" : v.toFixed(digits);
+  }
+
+  function currentShiftStack() {
+    const ss = state.analysis && state.analysis.shift_stack;
+    if (!ss || !ss.series) return null;
+    const det = detectorViewSelect.value;
+    return ss.series.find((s) => s.series === det) || null;
+  }
+
+  const SS_BADGE = {
+    passes_controls: ["Passes its controls (tentative)", "badge-ok"],
+    tentative: ["Not distinguishable from chance", "badge-warn"],
+    no_moving_candidate: ["No moving candidate", "badge-dim"],
+    not_run: ["Not run", "badge-dim"],
+  };
+
+  function kvTable(rows) {
+    const tbl = el("table", null, "kv-table");
+    for (const [k, v] of rows) {
+      const tr = el("tr");
+      tr.appendChild(el("th", k));
+      tr.appendChild(el("td", v));
+      tbl.appendChild(tr);
+    }
+    return tbl;
+  }
+
+  function renderShiftStackPanel() {
+    shiftstackPanel.innerHTML = "";
+    const a = state.analysis;
+    if (!a) return;
+    if (!a.shift_stack) {
+      shiftstackPanel.appendChild(
+        el("p", "Shift-and-stack was not requested for this search. Tick “Shift-and-stack search” and search again to run it.", "status-text")
+      );
+      return;
+    }
+    const e = currentShiftStack();
+    shiftstackPanel.appendChild(el("h3", `Shift-and-stack search (${detectorViewSelect.value || "?"})`));
+    shiftstackPanel.appendChild(el("p", a.shift_stack.statement, "status-text"));
+    if (!e) {
+      shiftstackPanel.appendChild(el("p", "No shift-and-stack result for this detector.", "status-text"));
+      return;
+    }
+    const [badgeText, badgeClass] = SS_BADGE[e.assessment] || [e.assessment, "badge-dim"];
+    const head = el("p");
+    head.appendChild(el("span", badgeText, `badge ${badgeClass}`));
+    head.appendChild(document.createTextNode(" " + (e.assessment_text || "")));
+    shiftstackPanel.appendChild(head);
+    if (!e.blind) return;
+
+    const b = e.blind;
+    const wcsFrame = state.frames[0];
+    const toSky = (x, y) => (wcsFrame && wcsFrame.gridWcs ? gridPixelToWorld(wcsFrame.gridWcs, x, y) : null);
+    const fmtSky = (s) => (s ? `${s.ra.toFixed(5)}, ${s.dec >= 0 ? "+" : ""}${s.dec.toFixed(5)}` : "—");
+
+    const rows = [
+      ["Exposures stacked", `${e.n_exposures} over ${fmtNum(b.baseline_yr, 2)} yr (reference epoch ${fmtDate(b.epoch_ref_mjd)})`],
+      ["Velocity search", `${b.n_velocities} trial motions up to ${fmtNum(b.v_max_arcsec_yr, 0)}″/yr, step ${fmtNum(b.velocity_step_arcsec_yr, 1)}″/yr, refined ×5 around each peak`],
+      ["Slowest motion distinguishable from none", `${fmtNum(b.min_distinguishable_speed_arcsec_yr, 1)}″/yr (half a PSF width over the baseline)`],
+    ];
+    const f = e.forced;
+    let predSky = null;
+    if (f) {
+      predSky = toSky(f.predicted_xy[0], f.predicted_xy[1]);
+      rows.push(["Predicted (catalogue) position", `${fmtSky(predSky)} at the reference epoch`]);
+      rows.push(["Predicted motion", `(${fmtNum(f.predicted_pm_arcsec_yr[0], 2)}, ${fmtNum(f.predicted_pm_arcsec_yr[1], 2)})″/yr east, north`]);
+      rows.push([
+        "Stack along predicted track",
+        `S/N ${fmtNum(f.snr_on_trajectory)}; same place with zero motion ${fmtNum(f.snr_same_position_no_motion)}; reversed motion ${fmtNum(f.snr_same_position_reversed_motion)}`,
+      ]);
+      rows.push([
+        "Same motion elsewhere in the field",
+        `${(100 * f.off_position.fraction_at_least_as_high).toFixed(1)}% of ${f.off_position.n} random positions reach that S/N (95th percentile ${fmtNum(f.off_position.p95)}; includes real stars)`,
+      ]);
+    } else {
+      rows.push(["Predicted track", "None: the target has no known proper motion, so only the blind search ran."]);
+    }
+    const moving = (b.candidates || []).filter((c) => c.moving);
+    if (!moving.length) rows.push(["Moving candidates", "None"]);
+    moving.forEach((c, i) => {
+      const sky = toSky(c.x, c.y);
+      const off = predSky && sky ? angularSepArcsec(sky.ra, sky.dec, predSky.ra, predSky.dec) : null;
+      const q = b.position_quantum_arcsec || 3.075; // candidate positions are whole grid pixels
+      const offText = off == null ? "" : off < q ? ` (within one ${q.toFixed(1)}″ grid pixel of the prediction)` : ` (${fmtNum(off, 1)}″ from prediction)`;
+      rows.push([
+        `Moving candidate ${i + 1}`,
+        `${fmtSky(sky)}${offText}; motion ≈ (${fmtNum(c.pm_east_arcsec_yr, 1)}, ${fmtNum(c.pm_north_arcsec_yr, 1)})″/yr east, north ` +
+          `(see “Velocity uncertainty” below); S/N ${fmtNum(c.snr)} vs ${fmtNum(c.snr_static)} with zero motion (S/N² gain ${fmtNum(c.delta_chi2)})`,
+      ]);
+    });
+    const ctrl = b.controls || {};
+    const ctrlVals = (ctrl.best_moving_snr || []).filter((v) => v > 0).sort((x, y) => y - x);
+    const floor = ctrl.n ? 1 / (ctrl.n + 1) : null;
+    let pText = "not defined (no moving peak in the real search)";
+    if (ctrl.false_alarm_probability != null) {
+      pText = Math.abs(ctrl.false_alarm_probability - floor) < 1e-9
+        ? `≤ ${floor.toFixed(3)} (no control as strong; the smallest value ${ctrl.n} controls can show)`
+        : ctrl.false_alarm_probability.toFixed(3);
+    }
+    rows.push([
+      "Time-shuffled controls",
+      `${ctrl.n || 0} searches with the observation dates shuffled. ${ctrlVals.length} produced a moving peak` +
+        (ctrlVals.length ? ` (strongest S/N ${ctrlVals.slice(0, 3).map((v) => v.toFixed(1)).join(", ")})` : "") +
+        `; best real moving peak S/N ${fmtNum(b.best_moving_snr_coarse)} on the same coarse grid. False-alarm probability ${pText}.`,
+    ]);
+    shiftstackPanel.appendChild(kvTable(rows));
+    // Velocity uncertainty: formal (statistical, from this search) and the
+    // estimated total (from the WISE 0855 validation, docs/PHASE2.md) are
+    // shown separately; the formal number alone understates the error.
+    const unc = el("div", null, "uncertainty-box");
+    unc.appendChild(el("strong", "Velocity uncertainty"));
+    const ul2 = el("ul");
+    const formal = moving.map((c, i) =>
+      `candidate ${i + 1}: ±${fmtNum(c.pm_east_err_arcsec_yr, 2)} east, ±${fmtNum(c.pm_north_err_arcsec_yr, 2)} north`).join("; ");
+    ul2.appendChild(el("li",
+      `Formal (statistical only): ${formal || "—"} ″/yr. This is the width of the S/N peak on the refinement grid ` +
+      `and cannot be smaller than one grid step. It is NOT the full measurement error.`));
+    ul2.appendChild(el("li",
+      "Estimated total: about 1–1.5″/yr per component. Basis: the WISE 0855 validation on real data, where the " +
+      "velocity changed by ~1″/yr between equivalent refinement schemes and the north component differed from the " +
+      "catalogue by ~0.9″/yr (~2σ). This is an estimate from one validated object, not a per-source calculation."));
+    ul2.appendChild(el("li",
+      "Not included in the formal error: candidate positions are whole 3.1″ grid pixels; exposures are not " +
+      "individually registered against Gaia in this search; one Gaussian PSF is assumed for all exposures."));
+    ul2.appendChild(el("li",
+      "Use the velocity to say whether and roughly how a source moves, not as a precise proper motion. The tracked-source " +
+      "fit (table below) is the better motion measurement when the source is detected in each epoch."));
+    unc.appendChild(ul2);
+    shiftstackPanel.appendChild(unc);
+    if (e.image) {
+      const btn = el("button", "Show the stacked S/N map in the viewer", "text-btn");
+      btn.type = "button";
+      btn.addEventListener("click", () => {
+        viewModeSelect.value = "shiftstack";
+        viewModeSelect.dispatchEvent(new Event("change"));
+      });
+      shiftstackPanel.appendChild(btn);
+    }
+  }
+
+  /** Viewer branch for view mode "shiftstack". */
+  function renderShiftStackView() {
+    const e = currentShiftStack();
+    if (!e || !e.image) {
+      canvasCtx.clearRect(0, 0, canvas.width, canvas.height);
+      state.lastRenderedGrid = null;
+      drawOverlay();
+      frameLabel.textContent = state.analysis && state.analysis.shift_stack
+        ? "No shift-and-stack image for this detector (too few exposures)."
+        : "Shift-and-stack was not requested for this search (tick “Shift-and-stack search” and search again).";
+      return;
+    }
+    const img = e.image;
+    const raw = base64ToUint16Array(img.payload_b64);
+    const values = new Float32Array(raw.length);
+    for (let i = 0; i < raw.length; i++) values[i] = raw[i] === INVALID_SENTINEL ? NaN : raw[i] * img.scale + img.offset;
+    const pseudo = e.forced ? { targetPixel: { x: e.forced.predicted_xy[0], y: e.forced.predicted_xy[1] } } : null;
+    renderGrid(img.width, img.height, values, { useGlobalAsinhLevels: false, frame: pseudo, wcsFrame: state.frames[0] });
+    // (drawOverlay circles the moving candidates)
+    frameLabel.textContent =
+      `Shift-and-stack S/N map (${e.series}), stacked for motion ≈ (${img.pm_east_arcsec_yr.toFixed(1)}, ${img.pm_north_arcsec_yr.toFixed(1)})″/yr east, north (uncertain by ~1–1.5″/yr) ` +
+      `[${img.velocity_source}], positions at ${fmtDate(img.epoch_mjd)}.\n` +
+      `Values are S/N in units of this stack's measured noise. Sources with this motion add up to a point; static stars smear out. ` +
+      `Red cross: predicted target position. Green circles: moving candidates. North up, east left.`;
   }
 
   // ---------------------------------------------------------------------
@@ -1063,6 +1872,7 @@
     const qualityIdx = QUALITY_LEVELS.indexOf(urlState.quality);
     qualitySlider.value = qualityIdx >= 0 ? qualityIdx : 1;
     qualityValue.textContent = QUALITY_LABELS[parseInt(qualitySlider.value, 10)];
+    shiftstackCheckbox.checked = urlState.shiftstack;
     if (urlState.position) {
       positionInput.value = urlState.position;
       runSearch();

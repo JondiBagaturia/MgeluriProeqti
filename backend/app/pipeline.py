@@ -28,6 +28,8 @@ import astropy.units as u
 from scipy import ndimage
 
 from .irsa import Cutout, ImageRecord
+from .resample import resample, input_pixel_coords
+from .config import get_config
 
 # Every SPHEREx file has this CTYPE/SIP mismatch (brief: "Sky WCS is
 # TAN-SIP in the IMAGE header", but CTYPE itself just says RA---TAN /
@@ -233,8 +235,18 @@ def process_cutout(
     # when the nearest native pixel plainly wasn't). Confirmed live
     # (scripts/check_center_pixel_coverage.py): both effects were real,
     # non-trivial contributors to Barnard's Star's "missing centre" bug.
-    reproj_image = reproject_nearest(corrected, in_wcs, target_wcs, shape_out)
-    reproj_var = reproject_nearest(variance_masked, in_wcs, target_wcs, shape_out)
+    #
+    # 2026-11 (docs/PHASE2.md): the kernel is now configurable and defaults
+    # to Lanczos-3, chosen on a synthetic benchmark (lowest photometric
+    # scatter, 7x smaller false residuals in difference images than
+    # nearest-neighbour). app/resample.py keeps the property that mattered
+    # above: an output pixel whose nearest native pixel is masked stays
+    # masked, and masked neighbours get zero weight instead of spreading NaN.
+    kernel = get_config().resample_kernel
+    coords = input_pixel_coords(in_wcs, target_wcs, shape_out)
+    reproj_image, reproj_var = resample(
+        corrected, variance_masked, in_wcs, target_wcs, shape_out, kernel=kernel, coords=coords
+    )
 
     wavelength_um, bandwidth_um = central_wavelength(hdul, target_coord)
 

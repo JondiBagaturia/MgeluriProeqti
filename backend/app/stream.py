@@ -32,6 +32,9 @@ from .pipeline import (
 )
 from .encode import encode_frame, EncodedFrame
 from .config import get_config
+from .photometry import aperture_photometry
+from .discovery import SeriesFrame, analyze_series, DiscoveryConfig
+from .catalogs import gaia_sources, catwise_sources, CatalogError
 
 log = logging.getLogger(__name__)
 
@@ -54,16 +57,33 @@ def stream_frames(
     mode: str,
     resolve_seconds: float = 0.0,
     max_exposures_per_group: Optional[int] = None,
+    analyze: bool = True,
+    records_override: Optional[list] = None,
+    cutout_source=None,
+    exposure_sink: Optional[list] = None,
+    shiftstack: bool = False,
     report_progress: bool = False,
-) -> Iterator[Union[EncodedFrame, DownloadProgress]]:
-    """Yields each EncodedFrame as soon as it is ready. With
-    `report_progress=True`, DownloadProgress items are yielded in between:
-    one right after discovery (0 of N) and one per finished download."""
+) -> Iterator[object]:
+    """Yields EncodedFrame objects as groups complete, then (unless
+    `analyze` is False) one final dict {"type": "analysis", ...} with the
+    detection / tracking / catalogue / ranking results for every detector
+    series, computed from the very frames just streamed (no second fetch).
+
+    With `report_progress=True`, DownloadProgress items are yielded in
+    between: one right after discovery (0 of N) and one per finished
+    download."""
     t_start = time.time()
     stats = _TimingStats(resolve_s=resolve_seconds)
 
     t0 = time.time()
-    records = find_images(resolved.coord, fov_arcmin=fov_arcmin, detectors=detectors)
+    # `records_override` / `cutout_source` let the offline regression tests and
+    # scripts/validate_targets.py run this exact code path on cached real
+    # cutouts instead of live IRSA. `exposure_sink`, if given, receives every
+    # processed exposure (for per-exposure analyses such as shift-and-stack).
+    if records_override is not None:
+        records = [r for r in records_override if not detectors or r.detector in detectors]
+    else:
+        records = find_images(resolved.search_position(), fov_arcmin=fov_arcmin, detectors=detectors)
     stats.discover_s = time.time() - t0
     stats.n_images_found = len(records)
     if not records:
@@ -78,6 +98,16 @@ def stream_frames(
 
     cfg = get_config()
     target_wcs, shape_out = make_target_wcs(centred_coord, fov_arcmin, cfg.pixel_scale_arcsec)
+
+    grid = _GridContext(
+        resolved=resolved,
+        wcs=target_wcs,
+        shape=shape_out,
+        centre_ra=float(centred_coord.ra.deg),
+        centre_dec=float(centred_coord.dec.deg),
+        grid_scale_arcsec=cfg.pixel_scale_arcsec,
+        native_scale_arcsec=cfg.native_pixel_scale_arcsec,
+    )
 
     groups_full = group_indices(records, mode=mode)
     # Cap *before* fetching, not after - the timing report showed ~97% of
@@ -111,9 +141,11 @@ def stream_frames(
         yield DownloadProgress(0, 0, n_to_fetch)
 
     t_fetch_start = time.time()
-    for cutout in fetch_cutouts(
-        records_to_fetch, centred_coord, fov_arcmin=fov_arcmin, yield_failures=report_progress
-    ):
+    fetch = cutout_source or fetch_cutouts
+    # Only the live fetcher can report a download it gave up on; a test's
+    # cutout_source keeps its plain (records, coord, fov_arcmin) signature.
+    fetch_kwargs = {"yield_failures": True} if (report_progress and cutout_source is None) else {}
+    for cutout in fetch(records_to_fetch, centred_coord, fov_arcmin=fov_arcmin, **fetch_kwargs):
         if isinstance(cutout, FetchFailure):
             n_failed += 1
             yield DownloadProgress(n_fetched, n_failed, n_to_fetch)
@@ -126,6 +158,10 @@ def stream_frames(
         t0 = time.time()
         p = process_cutout(cutout, centred_coord, target_wcs, shape_out)
         stats.reproject_s += time.time() - t0
+        if exposure_sink is not None:
+            exposure_sink.append(p)
+        if shiftstack:
+            grid.exposures.append(p)
 
         ridx = index_of_record[id(cutout.record)]
         gi = record_to_group[id(cutout.record)]
@@ -135,7 +171,7 @@ def stream_frames(
             emitted.add(gi)
             members = [pending[gi][i] for i in sorted(pending[gi].keys())]
             n_frames_emitted += 1
-            yield _combine_and_encode(gi, len(groups), members, stats)
+            yield _combine_and_encode(gi, len(groups), members, stats, grid=grid)
     stats.fetch_wall_s = time.time() - t_fetch_start
 
     # Groups that never fully completed (some fetch(es) failed after
@@ -146,7 +182,7 @@ def stream_frames(
         if gi not in emitted and pending[gi]:
             members = [pending[gi][i] for i in sorted(pending[gi].keys())]
             n_frames_emitted += 1
-            yield _combine_and_encode(gi, len(groups), members, stats, partial=True)
+            yield _combine_and_encode(gi, len(groups), members, stats, partial=True, grid=grid)
 
     stats.log_report(t_start, n_fetched, n_frames_emitted)
 
@@ -157,6 +193,62 @@ def stream_frames(
         raise DiscoveryError(
             f"found {len(records)} image(s) but every cutout download failed (IRSA busy) - try again shortly"
         )
+
+    if analyze and grid.collected:
+        t0 = time.time()
+        try:
+            analysis = run_analysis(grid, fov_arcmin, mode)
+            if shiftstack:
+                analysis["shift_stack"] = run_shift_stack(grid)
+        except Exception as exc:  # noqa: BLE001 - analysis must never take the frames down with it
+            log.exception("analysis failed")
+            analysis = {"type": "analysis", "error": f"{type(exc).__name__}: {exc}", "series": []}
+        analysis["seconds"] = time.time() - t0
+        yield analysis
+
+
+class _GridContext:
+    """Everything needed to locate the target on the common grid at any
+    epoch, and to tell the client exactly how that grid maps to the sky."""
+
+    def __init__(self, resolved, wcs, shape, centre_ra, centre_dec, grid_scale_arcsec, native_scale_arcsec):
+        self.resolved = resolved
+        self.wcs = wcs
+        self.shape = shape
+        self.centre_ra = centre_ra
+        self.centre_dec = centre_dec
+        self.grid_scale_arcsec = grid_scale_arcsec
+        self.native_scale_arcsec = native_scale_arcsec
+        # (series key, SeriesFrame) for every emitted frame, kept for the
+        # end-of-stream analysis. Grids are small (a 5' field is 99x99).
+        self.collected: list[tuple[str, SeriesFrame]] = []
+        # Individual processed exposures, kept only when a shift-and-stack
+        # search was requested (each is one small grid image + variance).
+        self.exposures: list = []
+
+    def wcs_metadata(self) -> dict:
+        # FITS conventions: crpix is 1-based. cdelt in degrees. Array row 0 is
+        # the SOUTH edge (cdelt2 > 0) and column 0 the EAST edge (cdelt1 < 0),
+        # so a north-up/east-left display must draw row h-1 at the top.
+        w = self.wcs.wcs
+        return {
+            "ctype": [str(c) for c in w.ctype],
+            "crval": [float(v) for v in w.crval],
+            "crpix": [float(v) for v in w.crpix],
+            "cdelt": [float(v) for v in w.cdelt],
+        }
+
+    def target_pixel(self, mjd: float) -> tuple[float, float, bool]:
+        """0-based (x, y) of the target at `mjd`; third value says whether
+        proper motion was applied (False = fixed position)."""
+        if self.resolved.has_proper_motion:
+            coord = self.resolved.propagate_to(Time(mjd, format="mjd"))
+            moved = True
+        else:
+            coord = self.resolved.coord
+            moved = False
+        x, y = self.wcs.world_to_pixel(coord)
+        return float(x), float(y), moved
 
 
 class _TimingStats:
@@ -227,16 +319,40 @@ def _combine_and_encode(
     members: list[ProcessedCutout],
     stats: "_TimingStats",
     partial: bool = False,
+    grid: Optional["_GridContext"] = None,
 ) -> EncodedFrame:
     t0 = time.time()
     image, variance, n_contrib = combine_inverse_variance(
         [m.image for m in members], [m.variance for m in members]
     )
-    # Fill small, isolated NaN holes (see fill_small_gaps's docstring - this
-    # is specifically for the "target's own peak pixel is masked in every
-    # exposure" bug). Only after combining across every available exposure,
-    # and only small gaps - a real masked region is left untouched.
+    times = [m.record.time_mjd for m in members]
+
+    # Measure BEFORE any display hole-filling: a saturated/masked core must
+    # make the measurement refuse, not be measured off interpolated wings
+    # (docs/AUDIT.md C4).
+    target_meta = None
+    phot_meta = None
+    if grid is not None:
+        tx, ty, moved = grid.target_pixel(float(np.mean(times)))
+        inflation = get_config().aperture_variance_inflation
+        phot = aperture_photometry(
+            image, variance, tx, ty, grid.grid_scale_arcsec, variance_inflation=inflation
+        )
+        target_meta = {"x": tx, "y": ty, "proper_motion_applied": moved}
+        phot_meta = phot.to_dict()
+        waves_here = [m.central_wavelength_um for m in members if m.central_wavelength_um is not None]
+        grid.collected.append((
+            "+".join(sorted({m.record.detector for m in members})),
+            SeriesFrame(image=image, variance=variance, time_mjd=float(np.mean(times)),
+                        wavelength_um=float(np.mean(waves_here)) if waves_here else None),
+        ))
+
+    # Fill small, isolated NaN holes FOR DISPLAY ONLY (see fill_small_gaps's
+    # docstring). The filled pixel indices are sent to the client so the
+    # readout can say "interpolated", and no measurement uses them.
+    before_nan = ~np.isfinite(image)
     image, n_gap_filled = fill_small_gaps(image)
+    filled_idx = np.flatnonzero(before_nan & np.isfinite(image))
     stats.combine_s += time.time() - t0
 
     contamination: dict[str, int] = {}
@@ -245,7 +361,6 @@ def _combine_and_encode(
             contamination[name] = contamination.get(name, 0) + count
     waves = [m.central_wavelength_um for m in members if m.central_wavelength_um is not None]
     bws = [m.bandwidth_um for m in members if m.bandwidth_um is not None]
-    times = [m.record.time_mjd for m in members]
 
     frame = Frame(
         group_index=group_index,
@@ -264,8 +379,182 @@ def _combine_and_encode(
     )
 
     t0 = time.time()
-    encoded = encode_frame(
-        frame, extra_metadata={"n_groups": n_groups, "partial": partial, "n_gap_filled_pixels": n_gap_filled}
-    )
+    extra = {
+        "n_groups": n_groups,
+        "partial": partial,
+        "n_gap_filled_pixels": n_gap_filled,
+        # Capped so a pathological frame can't bloat the stream; the count above is exact.
+        "gap_filled_indices": filled_idx[:2000].tolist(),
+        "photometry": phot_meta,
+        "target_pixel": target_meta,
+    }
+    if grid is not None:
+        extra["grid_wcs"] = grid.wcs_metadata()
+        extra["grid_centre_deg"] = [grid.centre_ra, grid.centre_dec]
+        extra["grid_scale_arcsec"] = grid.grid_scale_arcsec
+        extra["native_scale_arcsec"] = grid.native_scale_arcsec
+    encoded = encode_frame(frame, extra_metadata=extra)
     stats.encode_s += time.time() - t0
     return encoded
+
+
+def run_analysis(grid: "_GridContext", fov_arcmin: float, mode: str) -> dict:
+    """Detect, track, cross-match and rank the sources of every detector
+    series collected during this request."""
+    # One cone per catalogue covers the whole square field (half-diagonal + margin).
+    radius_deg = (fov_arcmin / 60.0) * 0.5 * 1.5
+    catalog_errors = []
+    try:
+        gaia = gaia_sources(grid.centre_ra, grid.centre_dec, radius_deg)
+    except CatalogError as exc:
+        gaia = None
+        catalog_errors.append(str(exc))
+    try:
+        catwise = catwise_sources(grid.centre_ra, grid.centre_dec, radius_deg)
+    except CatalogError as exc:
+        catwise = None
+        catalog_errors.append(str(exc))
+
+    by_series: dict[str, list[SeriesFrame]] = {}
+    for key, frame in grid.collected:
+        by_series.setdefault(key, []).append(frame)
+
+    series_out = []
+    for key in sorted(by_series):
+        res = analyze_series(
+            by_series[key], grid.wcs, grid.grid_scale_arcsec, grid.native_scale_arcsec,
+            grid.centre_ra, grid.centre_dec, gaia=gaia, catwise=catwise, series=key,
+            cfg=DiscoveryConfig(aperture_variance_inflation=get_config().aperture_variance_inflation),
+        )
+        if "+" in key:
+            res["warning"] = (
+                "This series stacks several detectors, so its frames mix very different wavelengths. "
+                "Brightness changes here are not evidence of variability. Use per-detector grouping."
+            )
+        series_out.append(res)
+
+    return {
+        "type": "analysis",
+        "grouping": mode,
+        "catalog_errors": catalog_errors,
+        "statement": (
+            "Automated measurements for human inspection. 'candidate' and 'unmatched' are not discovery claims; "
+            "no object class is estimated."
+        ),
+        "series": series_out,
+    }
+
+
+SHIFT_STACK_CONTROLS = 20
+
+
+def _encode_map(arr: np.ndarray) -> dict:
+    from .encode import quantize_uint16
+    import base64
+
+    q, scale, offset = quantize_uint16(np.asarray(arr, dtype=np.float32))
+    return {"width": int(arr.shape[1]), "height": int(arr.shape[0]), "scale": scale, "offset": offset,
+            "payload_b64": base64.b64encode(q.tobytes()).decode("ascii")}
+
+
+def run_shift_stack(grid: "_GridContext") -> dict:
+    """Trial-motion shift-and-stack per detector, on the single exposures
+    fetched for this request (app/shiftstack.py). For each detector:
+
+      * blind: search over position and velocity, with SHIFT_STACK_CONTROLS
+        time-shuffled control searches;
+      * forced: if the target has a known proper motion, the stack along
+        that motion at its predicted position, with its controls;
+      * one S/N image (in units of the stack's own measured noise), stacked
+        at the velocity of the strongest moving candidate, else at the
+        target's catalogue motion, else at zero motion.
+
+    A search, not a confirmation: see `assessment` and docs/PHASE2.md.
+    """
+    from .shiftstack import ShiftStackConfig, StackFrame, forced, prepare, search, stack_at
+
+    out = {
+        "statement": (
+            "Shift-and-stack is a search technique. A candidate that passes its controls is worth inspecting; "
+            "it is not an independent confirmation of a detection or a discovery."
+        ),
+        "n_controls": SHIFT_STACK_CONTROLS,
+        "series": [],
+    }
+    by_det: dict[str, list] = {}
+    for p in grid.exposures:
+        by_det.setdefault(p.record.detector, []).append(p)
+
+    for det in sorted(by_det):
+        exps = sorted(by_det[det], key=lambda p: p.record.time_mjd)
+        entry = {"series": det, "n_exposures": len(exps)}
+        if len(exps) < 3:
+            entry["assessment"] = "not_run"
+            entry["assessment_text"] = f"Only {len(exps)} exposure(s): too few for a shift-and-stack search."
+            out["series"].append(entry)
+            continue
+        frames = [StackFrame(image=p.image, variance=p.variance, time_mjd=p.record.time_mjd) for p in exps]
+        cfg = ShiftStackConfig(n_controls=SHIFT_STACK_CONTROLS)
+        res = search(frames, grid.grid_scale_arcsec, cfg)
+        t_ref = res["epoch_ref_mjd"]
+        for c in res["candidates"]:
+            sky = grid.wcs.pixel_to_world(c["x"], c["y"])
+            c["ra_deg"], c["dec_deg"] = float(sky.ra.deg), float(sky.dec.deg)
+        entry["blind"] = res
+
+        target_v = None
+        if grid.resolved.has_proper_motion:
+            tx, ty, _ = grid.target_pixel(t_ref)
+            target_v = (grid.resolved.pmra / 1000.0, grid.resolved.pmdec / 1000.0)
+            f = forced(frames, grid.grid_scale_arcsec, tx, ty, *target_v, t_ref=t_ref, cfg=cfg)
+            f["predicted_xy"] = [tx, ty]
+            f["predicted_pm_arcsec_yr"] = list(target_v)
+            entry["forced"] = f
+
+        moving = [c for c in res["candidates"] if c["moving"]]
+        p_fa = res["controls"]["false_alarm_probability"]
+        n_c = res["controls"]["n"]
+        floor = 1.0 / (n_c + 1) if n_c else None
+        if not moving:
+            entry["assessment"] = "no_moving_candidate"
+            entry["assessment_text"] = (
+                f"No peak passed the moving-source criteria (S/N >= {cfg.detect_snr:.0f}, motion >= "
+                f"{res['min_distinguishable_speed_arcsec_yr']:.1f}\"/yr, S/N^2 gain over zero motion >= {cfg.min_delta_chi2})."
+            )
+        elif p_fa is not None and floor is not None and p_fa <= floor + 1e-12:
+            entry["assessment"] = "passes_controls"
+            entry["assessment_text"] = (
+                f"None of the {n_c} time-shuffled control searches produced a moving peak as strong as the best "
+                f"real one. Empirical false-alarm probability <= {floor:.3f} (the smallest value {n_c} controls "
+                "can establish, not zero). Tentative until confirmed by other means."
+            )
+        else:
+            entry["assessment"] = "tentative"
+            entry["assessment_text"] = (
+                f"A moving peak was found, but {('some' if p_fa is None else round(p_fa * (n_c + 1)) - 1)} of the "
+                f"{n_c} time-shuffled controls produced one at least as strong (false-alarm probability "
+                f"{'n/a' if p_fa is None else f'{p_fa:.2f}'}). Not distinguishable from chance."
+            )
+
+        if moving:
+            best = max(moving, key=lambda c: c["snr"])
+            v_disp, why = (best["pm_east_arcsec_yr"], best["pm_north_arcsec_yr"]), "strongest moving candidate"
+        elif target_v is not None:
+            v_disp, why = target_v, "target's catalogue motion"
+        else:
+            v_disp, why = (0.0, 0.0), "zero motion (ordinary stack)"
+        snr_map, _ = stack_at(prepare(frames, grid.grid_scale_arcsec, cfg), v_disp[0], v_disp[1], t_ref=t_ref)
+        entry["image"] = {
+            **_encode_map(snr_map),
+            "units": "S/N (matched filter, in units of this stack's measured noise)",
+            "pm_east_arcsec_yr": float(v_disp[0]),
+            "pm_north_arcsec_yr": float(v_disp[1]),
+            "velocity_source": why,
+            "epoch_mjd": float(t_ref),
+            "note": ("Every exposure is shifted so that a source moving with this velocity stays at its position "
+                     "at the reference epoch. Sources with that motion add up into a point; static stars are "
+                     "smeared along the opposite direction. Same grid and orientation as the frames (north up, "
+                     "east left)."),
+        }
+        out["series"].append(entry)
+    return out

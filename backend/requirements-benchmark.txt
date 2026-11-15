@@ -1,0 +1,5 @@
+# Optional: only for scripts/benchmark_resampling.py, which compares our
+# resampling kernels against reproject's adaptive and exact (flux-conserving)
+# methods. Not needed by the application or the test suite.
+-r requirements.txt
+reproject>=0.14

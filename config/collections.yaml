@@ -43,6 +43,8 @@ quality:
 detectors:
   # D1..D6, linear variable filters (see SPHEREx_tool_prompt.md). Default
   # subset for a new query — chosen for speed, user can add more.
+  # NB: frames are grouped per detector by default (docs/AUDIT.md C1);
+  # selecting two detectors gives two independent image series.
   all: [D1, D2, D3, D4, D5, D6]
   default: [D6, D2]
   wavelength_um:
@@ -80,3 +82,25 @@ fetch:
 # exactly either way - no blending, no new information, just smaller
 # on-screen squares.
 pixel_scale_arcsec: 3.075
+
+# Native SPHEREx detector pixel (IRSA SIA s_pixel_scale, verified 2026-11-15).
+# Used to correct photometric errors for the pixel duplication that
+# nearest-neighbour resampling onto the finer grid above introduces.
+native_pixel_scale_arcsec: 6.15
+
+spectrum:
+  # /api/spectrum used to download EVERY exposure (~190 x 4 MB at Barnard's
+  # Star). This caps it, spread evenly in time within each detector.
+  max_exposures: 60
+
+resampling:
+  # How each exposure is put on the common grid: nearest | bilinear | lanczos3.
+  # Chosen on scripts/benchmark_resampling.py (docs/PHASE2.md,
+  # docs/data/resampling_benchmark.json), not on looks.
+  kernel: lanczos3
+  # Resampled pixels are correlated, so the error of an aperture sum is
+  # larger than the per-pixel variances suggest. Measured factors (r = 9"):
+  aperture_variance_inflation:
+    nearest: 3.8
+    bilinear: 7.2
+    lanczos3: 5.0

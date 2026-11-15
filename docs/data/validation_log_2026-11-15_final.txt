@@ -1,0 +1,82 @@
+
+== barnard (36 exposures)
+   D3 MJD 60903-60914 lam 1.999: refused: masked_in_aperture
+   D3 MJD 61118-61165 lam 1.980: refused: masked_in_aperture
+   D3 MJD 61269-61305 lam 1.905: refused: masked_in_aperture
+   D6 MJD 60903-60914 lam 4.703: 3.34e+03 +- 4.2 mJy
+   D6 MJD 61118-61165 lam 4.687: 3.14e+03 +- 3.5 mJy
+   D6 MJD 61269-61305 lam 4.629: 3.49e+03 +- 4.6 mJy
+   track D6: rank 1 catalogued epochs 3 PM (-1061, 10358) +- 959 mas/yr [10.9 sigma]; catalogue (-802, 10362); var p=0.6825059973923709; gaia matched catwise catalog_unavailable
+   track D3: rank 1 uncertain epochs 3 PM (-2404, 9781) +- 4184 mas/yr [2.4 sigma]; catalogue (-802, 10362); var p=None; gaia ambiguous catwise catalog_unavailable
+
+== eps_ind_b (47 exposures)
+   D3 MJD 60794-60836 lam 1.839: 16.3 +- 0.061 mJy
+   D3 MJD 60947-60984 lam 1.997: 16.7 +- 0.051 mJy
+   D3 MJD 61159-61164 lam 2.061: 17.5 +- 0.052 mJy
+   D3 MJD 61305-61311 lam 2.025: 16.8 +- 0.051 mJy
+   D6 MJD 60794-60836 lam 4.644: 19.5 +- 0.15 mJy
+   D6 MJD 60947-60984 lam 4.625: 19.1 +- 0.12 mJy
+   D6 MJD 61159-61164 lam 4.765: 18.6 +- 0.12 mJy
+   D6 MJD 61305-61311 lam 4.724: 17.3 +- 0.13 mJy
+   track D6: rank 1 catalogued epochs 4 PM (4009, -2703) +- 425 mas/yr [11.4 sigma]; catalogue (3982, -2467); var p=0.3161024592823499; gaia matched catwise unmatched
+   track D3: rank 1 catalogued epochs 4 PM (3635, -2168) +- 455 mas/yr [9.3 sigma]; catalogue (3982, -2467); var p=0.8339233479704988; gaia matched catwise unmatched
+
+== wise0855 (33 exposures)
+   D5 MJD 60801-60801 lam 4.221: 0.417 +- 0.038 mJy
+   D5 MJD 60986-61022 lam 4.095: 0.369 +- 0.036 mJy
+   D5 MJD 61162-61174 lam 4.139: 0.471 +- 0.037 mJy
+   D6 MJD 60801-60801 lam 4.944: 0.237 +- 0.1 mJy
+   D6 MJD 60989-61022 lam 4.687: 0.656 +- 0.059 mJy
+   D6 MJD 61151-61171 lam 4.707: 0.636 +- 0.054 mJy
+   track D6: rank 4 candidate epochs 2 PM (-9004, -544) +- 1679 mas/yr [5.4 sigma]; catalogue (-8124, 673); var p=0.9317841987138447; gaia unmatched catwise ambiguous
+   track D5: rank 1 candidate epochs 3 PM (-6275, 895) +- 711 mas/yr [8.9 sigma]; catalogue (-8124, 673); var p=0.3346997667117153; gaia unmatched catwise ambiguous
+
+== rw_aur (36 exposures)
+   D3 MJD 60930-60938 lam 2.063: 435 +- 0.55 mJy
+   D3 MJD 61092-61102 lam 2.055: 558 +- 0.55 mJy
+   D3 MJD 61296-61300 lam 1.927: 456 +- 0.4 mJy
+   D6 MJD 60930-60938 lam 4.751: 2.49e+03 +- 2.7 mJy
+   D6 MJD 61092-61102 lam 4.746: 1.81e+03 +- 1.8 mJy
+   D6 MJD 61296-61300 lam 4.742: 1.28e+03 +- 1.2 mJy
+   track D6: rank 3 catalogued epochs 3 PM (514, -46) +- 569 mas/yr [0.9 sigma]; catalogue (7, -20); var p=8.560719346777553e-13; gaia ambiguous catwise matched
+   track D3: rank 24 catalogued epochs 3 PM (630, 191) +- 568 mas/yr [1.2 sigma]; catalogue (7, -20); var p=0.0110640226485221; gaia ambiguous catwise matched
+
+== r_dra (29 exposures)
+   D3 MJD 60812-60839 lam 2.056: refused: masked_in_aperture
+   D3 MJD 61036-61044 lam 2.068: refused: masked_in_aperture
+   D3 MJD 61152-61204 lam 1.992: refused: masked_in_aperture
+   D6 MJD 60812-60838 lam 4.732: refused: masked_in_aperture
+   D6 MJD 61039-61053 lam 4.722: refused: masked_in_aperture
+   D6 MJD 61152-61204 lam 4.641: refused: masked_in_aperture
+   track D6: rank 1 uncertain epochs 3 PM (1107, 176) +- 4386 mas/yr [0.3 sigma]; catalogue (-21, 6); var p=None; gaia ambiguous catwise catalog_unavailable
+   track D3: rank 1 uncertain epochs 3 PM (-3286, -8224) +- 4482 mas/yr [2.0 sigma]; catalogue (-21, 6); var p=None; gaia matched catwise catalog_unavailable
+
+== field stars (repeatability)
+   D3 snr>=30: n=22 flux scatter median 5.3% (p84 7.1%), stat 0.87%; position rms median 0.23" (p84 0.39")
+   D3 10<=snr<30: n=15 flux scatter median 4.4% (p84 8.7%), stat 4.49%; position rms median 0.39" (p84 0.50")
+   D5 snr>=30: n=3 flux scatter median 4.0% (p84 5.7%), stat 1.50%; position rms median 0.16" (p84 0.19")
+   D5 10<=snr<30: n=7 flux scatter median 9.3% (p84 11.6%), stat 9.30%; position rms median 0.46" (p84 0.72")
+   D6 snr>=30: n=9 flux scatter median 2.8% (p84 5.4%), stat 1.59%; position rms median 0.17" (p84 0.31")
+   D6 10<=snr<30: n=7 flux scatter median 4.9% (p84 9.7%), stat 5.12%; position rms median 0.35" (p84 0.45")
+
+== WISE 0855 shift-and-stack
+   D5: 18 exposures; single-exposure S/N at prediction median 5.0 max 8.4
+      forced: S/N 11.9; no motion 11.2; reversed 8.7; off-position p95 10.5 max 56.2 (200 positions); other epochs {'-11 yr': 0.6948963104529654, '-5 yr': 0.5233755342693569, '+3 yr': 2.604286625737361}
+      blind: 49 velocities step 2.9"/yr, 2.7s (+controls 19s); false-alarm p 0.06451612903225806
+         S/N 12.1 static 11.2 v=(-6.5,0.0) moving=True offset from prediction 0.0"
+         S/N 101.3 static 101.3 v=(0.0,0.0) moving=False offset from prediction 135.0"
+         S/N 65.2 static 65.2 v=(0.0,0.0) moving=False offset from prediction 143.3"
+   D6: 15 exposures; single-exposure S/N at prediction median 3.8 max 7.3
+      forced: S/N 11.2; no motion 10.1; reversed 7.7; off-position p95 6.2 max 41.7 (200 positions); other epochs {'-11 yr': -0.7801315773173004, '-5 yr': 0.11389716181402747, '+3 yr': 1.7569734647374662}
+      blind: 49 velocities step 3.0"/yr, 2.0s (+controls 16s); false-alarm p 0.03225806451612903
+         S/N 11.6 static 10.1 v=(-8.9,0.0) moving=True offset from prediction 0.0"
+         S/N 72.1 static 72.1 v=(0.0,0.0) moving=False offset from prediction 135.0"
+         S/N 46.1 static 46.1 v=(0.0,0.0) moving=False offset from prediction 97.7"
+   D5+D6: 33 exposures; single-exposure S/N at prediction median 4.4 max 8.3
+      forced: S/N 13.3; no motion 12.2; reversed 9.4; off-position p95 10.0 max 58.3 (200 positions); other epochs {'-11 yr': 0.28981355191797076, '-5 yr': 0.49614799452545866, '+3 yr': 2.7091427044349152}
+      blind: 49 velocities step 2.9"/yr, 5.1s (+controls 34s); false-alarm p 0.03225806451612903
+         S/N 13.4 static 12.2 v=(-7.0,0.0) moving=True offset from prediction 0.0"
+         S/N 102.7 static 102.7 v=(0.0,0.0) moving=False offset from prediction 135.0"
+         S/N 66.2 static 66.2 v=(0.0,0.0) moving=False offset from prediction 143.3"
+
+wrote D:\Swavlai\programebi\Claude\Nasa\python\MgeluriProeqti\docs\data\validation_report.json
