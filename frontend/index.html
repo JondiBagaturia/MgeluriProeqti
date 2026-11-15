@@ -30,10 +30,15 @@ For typed coordinates the app asks CatWISE2020 whether a known fast mover passed
 
 <div id="pixel-readout" class="pixel-readout"></div>
 
+<!-- Loading: the bar and, beside it (never on top of it), Stop / Start again.
+     The pair has a fixed place of its own; it does not move when the top
+     window opens or hides. -->
 <div id="progress-wrap" hidden>
-  <div id="progress-bar"></div>
-  <span id="progress-text"></span>
-  <button type="button" id="progress-action" hidden>Stop</button>
+  <div id="progress-track">
+    <div id="progress-bar"></div>
+    <span id="progress-text"></span>
+  </div>
+  <button type="button" id="progress-action" class="text-btn" hidden>Stop</button>
 </div>
 
 <header class="dock dock-top" data-edge="top">

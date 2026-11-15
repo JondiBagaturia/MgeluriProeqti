@@ -523,65 +523,60 @@ input[type="checkbox"]:disabled { opacity: 0.35; }
 }
 .empty-state .text-btn { display: block; margin: 12px auto 0; }
 
-/* Loading: a framed bar that fills, with its count written across it. */
+/* Loading: a framed bar that fills, with its count written across it, and
+   a separate Stop / Start again button to its right.
+
+   The pair sits just below where the top window appears and stays there:
+   it used to slide down whenever that window opened, so reaching for Stop
+   (which opens the window) moved the button away from the cursor. The
+   button is beside the bar, not on it, so the fill can reach 100%. Above
+   the floating windows, so Stop is never covered. */
 #progress-wrap {
   position: fixed;
-  top: 18px;
+  top: max(96px, calc(var(--top-dock-h, 96px) + 28px));
   left: 50%;
-  z-index: 11;
-  width: min(420px, calc(100vw - 32px));
-  min-height: 24px;
-  padding: 2px 12px 3px;
+  z-index: 60;
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+  width: min(440px, calc(100vw - 32px));
+  transform: translateX(-50%);
+}
+#progress-wrap.has-action { width: min(580px, calc(100vw - 32px)); }
+#progress-track {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  min-height: 26px;
+  padding: 3px 12px 4px;
   background: #000;
   border: 1px solid var(--frame-hi);
   outline: 1px solid #000;
   box-shadow: inset 0 0 0 1px #000;
   overflow: hidden;
   text-align: center;
-  transform: translateX(-50%);
-  transition: transform 0.14s linear;
-}
-/* Steps down out of the search bar's way while the top window is open. */
-body.show-top #progress-wrap,
-body.show-all #progress-wrap {
-  transform: translate(-50%, calc(var(--top-dock-h, 96px) + 10px));
 }
 #progress-bar {
   position: absolute;
   inset: 1px auto 1px 1px;
   width: 0%;
+  max-width: calc(100% - 2px);
   background: linear-gradient(#4a5cc0, var(--bar-blue) 55%, #27347c);
   transition: width 0.25s ease;
 }
-/* Stop (while a search is loading) / Start again (after it was stopped):
-   a cell at the right end of the bar. */
-#progress-wrap.has-action {
-  width: min(560px, calc(100vw - 32px));
-  padding-right: 116px;
-}
-#progress-action {
-  position: absolute;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 1;
-  min-width: 104px;
-  padding: 0 12px 1px;
-  background: #000;
-  color: var(--ink);
-  border: none;
-  border-left: 1px solid var(--frame-hi);
-  border-radius: 0;
-  font: inherit;
-  font-size: 14.5px;
-}
-#progress-action:hover { color: var(--ink-bright); background: #17130b; }
-#progress-action:active { color: var(--active); }
 #progress-text {
   position: relative;
   font-size: 14.5px;
   color: var(--ink-bright);
   text-shadow: 0 1px 0 #000, 0 0 3px #000;
+}
+#progress-action {
+  flex: none;
+  align-self: center;
+  min-width: 110px;
+  padding: 3px 14px 4px;
+  font-size: 15px;
+  outline: 1px solid #000;
 }
 
 /* Tooltip that follows the cursor over the sky. */
@@ -667,7 +662,7 @@ body.show-all #progress-wrap {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .dock, #progress-wrap, #progress-bar { transition: none; }
+  .dock, #progress-bar { transition: none; }
 }
 
 /* Orientation note, bottom left of the sky: the display is always north up. */
