@@ -148,8 +148,14 @@ NEEDED_COLUMNS = {
 
 
 def _cone(table: str, ra: float, dec: float, radius_deg: float) -> Table:
+    from . import localdata
+
+    local = localdata.active_cone_field()
     if CONE_OVERRIDE is not None:
         text = CONE_OVERRIDE(table, ra, dec, radius_deg)
+    elif local is not None:
+        # app/localdata.py: REAL rows downloaded earlier for this field
+        text = localdata.cone(local, table, ra, dec, radius_deg)
     else:
         text = _cone_csv(table, round(ra, 5), round(dec, 5), round(radius_deg, 5))
     if not text.strip():

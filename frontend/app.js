@@ -71,7 +71,7 @@
   const detectorViewSelect = $("detector-view-select");
   // Bump when the frame wire format changes, so stale IndexedDB entries
   // (e.g. frames without grid WCS / photometry) are never revived.
-  const FRAME_SCHEMA = "v6";
+  const FRAME_SCHEMA = "v7"; // v7: frames carry saturation_mask_b64
   // Click within this distance of the predicted target position -> spectrum
   // follows the target's proper motion per exposure (2 native pixels).
   const TRACK_CLICK_RADIUS_ARCSEC = 12.3;
@@ -221,6 +221,37 @@
     runSearch();
   });
 
+  /** Banner whenever the data shown are the locally downloaded copy
+   * (app/localdata.py) rather than a live IRSA query. null hides it. */
+  function showDataSource(note, field) {
+    if (!note) {
+      dataSourceBanner.hidden = !state.offlineModeNote;
+      dataSourceBanner.textContent = "";
+      if (state.offlineModeNote) dataSourceBanner.appendChild(el("span", state.offlineModeNote));
+      return;
+    }
+    dataSourceBanner.textContent = "";
+    dataSourceBanner.appendChild(el("strong", "Local data. "));
+    dataSourceBanner.appendChild(el("span", note));
+    dataSourceBanner.hidden = false;
+  }
+
+  async function checkDataMode() {
+    try {
+      const r = await fetch(`${API_BASE}/api/local-data`);
+      if (!r.ok) return;
+      const d = await r.json();
+      if (d.mode === "cached") {
+        const names = (d.fields || []).map((f) => `${f.query || f.name} (${f.detectors.join("+")})`).join(", ");
+        state.offlineModeNote = `Offline mode (SPHEREX_DATA_MODE=cached): no network; only the downloaded fields can be searched: ${names || "none found"}.`;
+        showDataSource(null);
+      }
+    } catch (e) {
+      /* older backend without /api/local-data: nothing to show */
+    }
+  }
+  checkDataMode();
+
   async function fetchReleaseTag() {
     try {
       const resp = await fetch(`${API_BASE}/api/releases`);
@@ -252,6 +283,7 @@
     state.frames = [];
     state.allFrames = [];
     state.analysis = null;
+    showDataSource(null);
     state.selectedRank = null;
     state.currentIndex = 0;
     detectorViewSelect.innerHTML = "";
@@ -319,6 +351,8 @@
       const cachedAnalysis = cached.find((c) => c && c.__analysis);
       state.analysis = cachedAnalysis ? cachedAnalysis.__analysis : null;
       state.allFrames = cached.filter((c) => !(c && c.__analysis)).map(reviveFrame);
+      const localFrame = state.allFrames.find((f) => f.dataSource === "local_cache");
+      if (localFrame) showDataSource(localFrame.dataSourceNote);
       applyDetectorFilter(false);
       progressText.textContent = `Loaded ${state.allFrames.length} frame(s) from local cache`;
       progressBar.style.width = "100%";
@@ -371,6 +405,10 @@
         } catch (e) {
           continue;
         }
+        if (obj.type === "data_source") {
+          showDataSource(obj.note, obj.field);
+          continue;
+        }
         if (obj.type === "analysis") {
           state.analysis = obj;
           renderAnalysis();
@@ -398,6 +436,10 @@
           nGapFilledPixels: obj.n_gap_filled_pixels,
           gapFilledIndices: obj.gap_filled_indices || [],
           gapFilled: new Set(obj.gap_filled_indices || []),
+          saturationMaskB64: obj.saturation_mask_b64 || null,
+          dataSource: obj.data_source || "irsa_live",
+          dataSourceNote: obj.data_source_note || "",   // kept packed: survives the IndexedDB cache as-is
+          nSaturationFlaggedPixels: obj.n_saturation_flagged_pixels != null ? obj.n_saturation_flagged_pixels : null,
           photometry: obj.photometry || null,
           targetPixel: obj.target_pixel || null,
           gridWcs: obj.grid_wcs || null,
@@ -440,6 +482,9 @@
       return;
     }
     if (streamError) return; // never cache an incomplete result
+    // Never store a local-copy result (app/localdata.py) under the live key:
+    // once IRSA is back, the same search must query it again.
+    if (state.allFrames.some((f) => f.dataSource === "local_cache")) return;
 
     // Cache the whole set now that the stream is complete.
     const serializable = state.allFrames.map(({ gapFilled, ...f }) => ({ ...f, data: f.data.buffer.slice(0) }));
@@ -610,6 +655,8 @@
         `A mover shows as a dark/bright pair. Stationary bright stars also leave residuals (no PSF matching).`;
     } else if (viewMode === "shiftstack") {
       renderShiftStackView();
+    } else if (viewMode === "rgb") {
+      renderRgbView();
     } else if (viewMode === "sum") {
       const first = state.frames[0];
       const sum = new Float32Array(first.width * first.height);
@@ -680,6 +727,13 @@
       rgba[o + 3] = 255;
     }
 
+    paintRgba(width, height, rgba, frame);
+  }
+
+  /** Draw an RGBA grid (already north-up) at the current zoom, then the
+   * target crosshair, orientation marker and source overlays. Shared by the
+   * grey-scale views and the false-colour composite. */
+  function paintRgba(width, height, rgba, frame, beforeOverlays) {
     offscreen.width = width;
     offscreen.height = height;
     offscreenCtx.putImageData(new ImageData(rgba, width, height), 0, 0);
@@ -690,6 +744,7 @@
     canvasCtx.imageSmoothingEnabled = false;
     canvasCtx.clearRect(0, 0, canvas.width, canvas.height);
     canvasCtx.drawImage(offscreen, 0, 0, width, height, 0, 0, width * zoom, height * zoom);
+    if (beforeOverlays) beforeOverlays(zoom);
 
     // crosshair on the target (always the grid centre, by construction) -
     // colour/gapped style matches the planet-x renderer's blink.py
@@ -762,7 +817,8 @@
     frameLabel.textContent =
       `Frame ${state.currentIndex + 1}/${state.frames.length}   ${dateRange}\n` +
       `Detectors: ${frame.detectors.join(",")}   λ ${waveStr}\n` +
-      `${frame.nExposures} exposure(s) combined${partial}${gapFilled}`;
+      `${frame.nExposures} exposure(s) combined${partial}${gapFilled}` +
+      (frame.dataSource === "local_cache" ? "\nData: local copy downloaded earlier (not live IRSA)" : "");
   }
 
   // ---------------------------------------------------------------------
@@ -907,6 +963,15 @@
       return;
     }
     const pos = Number.isFinite(hit.ra) ? `RA ${hit.ra.toFixed(5)}  Dec ${hit.dec.toFixed(5)}` : "(no WCS - reload)";
+    const rg = state.lastRenderedGrid && state.lastRenderedGrid.rgb;
+    if (rg) {
+      const idx = hit.ay * state.lastRenderedGrid.width + hit.ax;
+      const parts = rg.channels.map((c) => c.values ? `${c.c} ${c.label} ${Number.isFinite(c.values[idx]) ? c.values[idx].toFixed(3) : "—"}` : `${c.c} ${c.label}`);
+      pixelReadout.textContent = rg.masked[idx]
+        ? `${pos}   ${rg.masked[idx] === 2 ? "masked: saturation / non-linearity flag in at least one channel" : "masked: no usable value in at least one channel"}`
+        : `${pos}   background-subtracted MJy/sr: ${parts.join(" · ")}`;
+      return;
+    }
     const val = Number.isFinite(hit.phys)
       ? `${hit.phys.toFixed(4)} MJy/sr${hit.interpolated ? " (interpolated for display, not data)" : ""}`
       : "no data";
@@ -1020,6 +1085,7 @@
   const analysisTableBody = $("analysis-table-body");
   const analysisDetail = $("analysis-detail");
   const showTracksCheckbox = $("show-tracks-checkbox");
+  const dataSourceBanner = $("data-source-banner");
   const rankOrderSelect = $("rank-order-select");
   const exportJsonBtn = $("export-json-btn");
   const exportCsvBtn = $("export-csv-btn");
@@ -1124,6 +1190,8 @@
     if (series.n_frames < 2) notes.push("Only one frame: no motion or variability can be measured.");
     if (series.warning) notes.push(series.warning);
     if (a.catalog_errors && a.catalog_errors.length) notes.push(`Catalogue problem: ${a.catalog_errors.join("; ")}`);
+    const localCats = Object.entries(a.catalog_source || {}).filter(([, v]) => v === "local_cache").map(([k]) => k.replace("gaia_dr3", "Gaia DR3").replace("catwise2020", "CatWISE2020"));
+    if (localCats.length) notes.push(`Catalogue matching used ${localCats.join(" and ")} rows downloaded earlier (local copy), not a live query.`);
     if (a.store_error) notes.push(`Classification storage unavailable: ${a.store_error}`);
     notes.push("Two rankings are shown: the raw Phase Two anomaly score (0–1: weighted motion, variability, missing catalogue counterpart) and a calibrated score with the same weights whose inputs are corrected for brightness, coverage, catalogue completeness and quality. Neither is a probability, and no object type is estimated.");
     analysisStatus.textContent = notes.join(" ");
@@ -1332,7 +1400,8 @@
     const series = currentSeriesAnalysis();
     if (!series || viewModeSelect.value === "sum" || viewModeSelect.value === "shiftstack") return;
     const toCanvas = (x, y) => [(x + 0.5) * zoom, (height - 1 - y + 0.5) * zoom];
-    const frameIdx = viewModeSelect.value === "blink" ? state.currentIndex : null;
+    const frameIdx = viewModeSelect.value === "blink" ? state.currentIndex : viewModeSelect.value === "rgb" ? rgb.overlayFrameIdx : null;
+    if (viewModeSelect.value === "rgb" && frameIdx == null) return;   // the selected series has no frame in this epoch
     const sel = selectedTrack();
 
     if (showTracksCheckbox.checked) {
@@ -2202,6 +2271,371 @@
   stSourceSelect.addEventListener("change", renderStSource);
 
   // ---------------------------------------------------------------------
+  // False-colour IR composite (RGB). Built client-side from the per-detector
+  // frames already resampled onto ONE common grid (resample.py), so pixel i
+  // is the same sky position in every channel. Rules:
+  //  * channels come from ONE observation epoch by default (frames whose mean
+  //    times lie within RGB_EPOCH_GAP_DAYS; dichroic pairs D1/D4, D2/D5, D3/D6
+  //    are simultaneous), because variability between epochs would otherwise
+  //    show up as colour;
+  //  * shortest wavelength -> blue, longest -> red (2 bands: G = 50/50 blend);
+  //  * a pixel with no data or a display-interpolated value in ANY channel is
+  //    drawn grey-hatched, never as zero flux in that channel;
+  //  * default stretch is the colour-preserving asinh of Lupton et al. (2004).
+  // ---------------------------------------------------------------------
+  const rgbControls = $("rgb-controls");
+  const rgbLegend = $("rgb-legend");
+  const rgbEpochSelect = $("rgb-epoch-select");
+  const rgbPrevBtn = $("rgb-prev");
+  const rgbNextBtn = $("rgb-next");
+  const rgbPlayBtn = $("rgb-play");
+  const rgbStretchMode = $("rgb-stretch-mode");
+  const rgbSoftSlider = $("rgb-soft-slider");
+  const rgbBlackSlider = $("rgb-black-slider");
+  const rgbWhiteSlider = $("rgb-white-slider");
+  const rgbSoftValue = $("rgb-soft-value");
+  const rgbBlackValue = $("rgb-black-value");
+  const rgbWhiteValue = $("rgb-white-value");
+  const rgbManual = { R: $("rgb-r-select"), G: $("rgb-g-select"), B: $("rgb-b-select") };
+  const RGB_EPOCH_GAP_DAYS = 45;            // same gap as the backend's epoch clustering
+  const RGB_SIMULTANEOUS_DAYS = 1;
+  const SAT_FLAG_NAMES = ["OVERFLOW", "BLOOM", "NONLINEAR"];   // = pipeline.SATURATION_FLAG_NAMES (SUR_ERROR is mostly on empty sky)
+  const rgb = { epochIndex: 0, signature: "", timer: null, overlayFrameIdx: null };
+
+  const rgbSoftening = () => Math.pow(10, -0.5 + (3 * parseFloat(rgbSoftSlider.value)) / 100);   // 0.3 .. 300 sigma
+  const rgbBlack = () => parseFloat(rgbBlackSlider.value);                                        // sigma
+  const rgbWhite = () => parseFloat(rgbWhiteSlider.value);                                        // percentile of intensity
+  const frameKey = (f) => `${f.detectors[0]}@${f.timeMjdMean.toFixed(5)}`;
+  const frameText = (f, g) => `${f.detectors[0]} ${f.centralWavelengthUm.toFixed(2)} µm · epoch ${g != null ? g + 1 : "?"} · MJD ${f.timeMjdMean.toFixed(2)}`;
+
+  /** Single-detector frames on the common grid, with a known wavelength. */
+  function rgbFrames() {
+    const all = (state.allFrames || []).filter((f) => f.detectors && f.detectors.length === 1 && f.centralWavelengthUm != null);
+    if (!all.length) return [];
+    const w = all[0].width, h = all[0].height;
+    return all.filter((f) => f.width === w && f.height === h);
+  }
+
+  function rgbEpochGroups(frames) {
+    const sorted = frames.slice().sort((a, b) => a.timeMjdMean - b.timeMjdMean);
+    const groups = [];
+    for (const f of sorted) {
+      const g = groups[groups.length - 1];
+      if (g && f.timeMjdMean - g.tMax <= RGB_EPOCH_GAP_DAYS) { g.frames.push(f); g.tMax = f.timeMjdMean; }
+      else groups.push({ frames: [f], tMin: f.timeMjdMean, tMax: f.timeMjdMean });
+    }
+    groups.forEach((g, i) => (g.index = i));
+    return groups;
+  }
+
+  /** One frame per detector, sorted by wavelength; mapping per the band count. */
+  function rgbAutoMapping(group) {
+    const seen = new Set();
+    const uniq = group.frames.slice().sort((a, b) => a.centralWavelengthUm - b.centralWavelengthUm)
+      .filter((f) => !seen.has(f.detectors[0]) && seen.add(f.detectors[0]));
+    if (uniq.length < 2) return { error: `Epoch ${group.index + 1} has only ${uniq.length} wavelength band (${uniq.map((f) => f.detectors[0]).join(", ") || "none"}). A false-colour composite needs at least 2 distinct bands from the same epoch: search with 2 or more detectors (e.g. D3,D6).` };
+    if (uniq.length === 2) return { R: [uniq[1]], G: "blend", B: [uniq[0]], bands: uniq.length };
+    const n = uniq.length, a = Math.round(n / 3), b = Math.round((2 * n) / 3);
+    return { B: uniq.slice(0, a), G: uniq.slice(a, b), R: uniq.slice(b), bands: n };
+  }
+
+  function sortedFinite(arr, mask) {
+    const out = [];
+    for (let i = 0; i < arr.length; i++) if (!mask[i] && Number.isFinite(arr[i])) out.push(arr[i]);
+    return Float32Array.from(out).sort();
+  }
+  function pctl(sorted, p) {
+    if (!sorted.length) return NaN;
+    return sorted[Math.min(sorted.length - 1, Math.max(0, Math.round((p / 100) * (sorted.length - 1))))];
+  }
+  function robustStats(arr, mask) {
+    const s = sortedFinite(arr, mask);
+    const med = pctl(s, 50);
+    const dev = Float32Array.from(s, (v) => Math.abs(v - med)).sort();
+    return { median: med, sigma: 1.4826 * pctl(dev, 50), n: s.length };
+  }
+
+  /** 1 = this grid pixel was built partly from saturated / non-linear native
+   * pixels (OVERFLOW, BLOOM, NONLINEAR) in at least one exposure. */
+  function saturationMask(f) {
+    if (!f.saturationMaskB64) return null;
+    if (f._satMask) return f._satMask;
+    const bytes = base64ToBytes(f.saturationMaskB64);
+    const N = f.width * f.height, out = new Uint8Array(N);
+    for (let i = 0; i < N; i++) out[i] = (bytes[i >> 3] >> (i & 7)) & 1;
+    Object.defineProperty(f, "_satMask", { value: out, enumerable: false });
+    return out;
+  }
+  function base64ToBytes(b64) {
+    const bin = atob(b64), out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+
+  /** Background-subtracted mean of the member frames; marks unusable pixels
+   * in `masked`: 1 = no data or display-interpolated, 2 = saturation-flagged. */
+  function rgbChannel(members, masked) {
+    const N = members[0].width * members[0].height;
+    const out = new Float32Array(N);
+    const diag = [];
+    for (const f of members) {
+      const v = physicalValuesForFrame(f);
+      const fmask = new Uint8Array(N);
+      const sat = saturationMask(f);
+      let nNan = 0, nInterp = 0, nSat = 0;
+      for (let i = 0; i < N; i++) {
+        if (!Number.isFinite(v[i])) { fmask[i] = 1; nNan++; }
+        else if (f.gapFilled && f.gapFilled.has(i)) { fmask[i] = 1; nInterp++; }
+        else if (sat && sat[i]) { fmask[i] = 2; nSat++; }
+      }
+      const bg = robustStats(v, fmask).median;
+      for (let i = 0; i < N; i++) {
+        if (fmask[i]) masked[i] = masked[i] === 1 ? 1 : fmask[i];
+        else out[i] += (v[i] - (Number.isFinite(bg) ? bg : 0)) / members.length;
+      }
+      diag.push({ frame: f, bg, nNan, nInterp, nSat, hasMask: !!sat, sat: SAT_FLAG_NAMES.map((k) => [k, (f.contamination || {})[k] || 0]).filter(([, c]) => c > 0) });
+    }
+    return { values: out, diag };
+  }
+
+  /** Current channel assignment: auto for the selected epoch, with optional manual overrides. */
+  function rgbAssignment(groups) {
+    const group = groups[Math.min(rgb.epochIndex, groups.length - 1)];
+    const auto = rgbAutoMapping(group);
+    const byKey = new Map(rgbFrames().map((f) => [frameKey(f), f]));
+    const manual = {};
+    for (const c of ["R", "G", "B"]) {
+      const v = rgbManual[c].value;
+      if (v === "blend") manual[c] = "blend";
+      else if (v !== "auto" && byKey.has(v)) manual[c] = [byKey.get(v)];
+    }
+    const anyManual = Object.keys(manual).length > 0;
+    if (auto.error && !(manual.R && manual.B)) return { group, error: auto.error };
+    const pick = (c) => manual[c] || (auto.error ? null : auto[c]);
+    const map = { R: pick("R"), G: pick("G") || "blend", B: pick("B") };
+    if (!map.R || !map.B || map.R === "blend" || map.B === "blend") return { group, error: "Red and blue must each be a frame (only green can be a 50/50 blend)." };
+    return { group, map, anyManual, bands: auto.bands };
+  }
+
+  function refreshRgbSelectors(frames, groups) {
+    const sig = frames.map(frameKey).join("|");
+    if (sig === rgb.signature) return;
+    rgb.signature = sig;
+    rgb.epochIndex = Math.min(rgb.epochIndex, Math.max(groups.length - 1, 0));
+    rgbEpochSelect.innerHTML = "";
+    for (const g of groups) {
+      const dets = Array.from(new Set(g.frames.map((f) => f.detectors[0]))).sort();
+      const o = document.createElement("option");
+      o.value = String(g.index);
+      o.textContent = `Epoch ${g.index + 1}: ${fmtDate(g.tMin)}${g.tMax - g.tMin > 0.5 ? `…${fmtDate(g.tMax)}` : ""} (${dets.join("+")})`;
+      rgbEpochSelect.appendChild(o);
+    }
+    rgbEpochSelect.value = String(rgb.epochIndex);
+    const epochOf = (f) => groups.findIndex((g) => g.frames.includes(f));
+    for (const c of ["R", "G", "B"]) {
+      const sel = rgbManual[c], prev = sel.value;
+      sel.innerHTML = "";
+      const add = (v, t) => { const o = document.createElement("option"); o.value = v; o.textContent = t; sel.appendChild(o); };
+      add("auto", "Auto (same epoch, by wavelength)");
+      if (c === "G") add("blend", "50/50 blend of red and blue");
+      frames.slice().sort((a, b) => a.timeMjdMean - b.timeMjdMean || a.centralWavelengthUm - b.centralWavelengthUm)
+        .forEach((f) => add(frameKey(f), frameText(f, epochOf(f))));
+      sel.value = Array.from(sel.options).some((o) => o.value === prev) ? prev : "auto";
+    }
+  }
+
+  function renderRgbView() {
+    const frames = rgbFrames();
+    const groups = rgbEpochGroups(frames);
+    refreshRgbSelectors(frames, groups);
+    rgbSoftValue.textContent = `${rgbSoftening().toFixed(rgbSoftening() < 10 ? 1 : 0)}σ`;
+    rgbBlackValue.textContent = `${rgbBlack().toFixed(1)}σ`;
+    rgbWhiteValue.textContent = `${rgbWhite().toFixed(1)}%`;
+    rgbLegend.innerHTML = "";
+    rgbLegend.hidden = false;
+    const fail = (msg) => {
+      canvasCtx.clearRect(0, 0, canvas.width, canvas.height);
+      canvasCtx.fillStyle = "#c9d2e3"; canvasCtx.font = "13px sans-serif";
+      canvasCtx.fillText("No false-colour composite (see below).", 10, 24);
+      state.lastRenderedGrid = null;
+      rgbLegend.appendChild(el("p", msg, "rgb-warning"));
+      frameLabel.textContent = "False-colour IR composite unavailable.";
+    };
+    if ((state.allFrames || []).some((f) => f.detectors && f.detectors.length > 1)) {
+      fail("These frames stack several detectors (wavelengths) together. A false-colour composite needs per-detector frames: choose “per detector, per epoch” grouping and search again.");
+      return;
+    }
+    if (groups.length === 0) { fail("No frames with a known wavelength are loaded."); return; }
+    const asg = rgbAssignment(groups);
+    if (asg.error) { fail(asg.error); return; }
+
+    const { map } = asg;
+    const ref = map.R[0];
+    const W = ref.width, H = ref.height, N = W * H;
+    const masked = new Uint8Array(N);
+    const chR = rgbChannel(map.R, masked), chB = rgbChannel(map.B, masked);
+    const chG = map.G === "blend" ? null : rgbChannel(map.G, masked);
+    let r = chR.values, b = chB.values;
+    let g = chG ? chG.values : Float32Array.from(r, (v, i) => 0.5 * (v + b[i]));
+    const perChannel = rgbStretchMode.value === "per_channel";
+    const scales = {};
+    if (perChannel) {
+      const norm = (arr, name) => {
+        const s = pctl(sortedFinite(arr, masked), 99.5);
+        const k = s > 0 ? s : 1;
+        scales[name] = k;
+        return Float32Array.from(arr, (v) => v / k);
+      };
+      r = norm(r, "R"); b = norm(b, "B"); g = chG ? norm(g, "G") : Float32Array.from(r, (v, i) => 0.5 * (v + b[i]));
+    }
+
+    // Lupton et al. (2004): one intensity I = (r+g+b)/3 drives the stretch,
+    // every channel is multiplied by the SAME factor asinh(I'/beta)/I, and a
+    // pixel whose largest channel exceeds 1 is scaled down as a whole, so
+    // R:G:B ratios survive in bright cores instead of saturating to white.
+    const I = new Float32Array(N);
+    for (let i = 0; i < N; i++) I[i] = (Math.max(r[i], 0) + Math.max(g[i], 0) + Math.max(b[i], 0)) / 3;
+    const st0 = robustStats(Float32Array.from(r, (v, i) => (v + g[i] + b[i]) / 3), masked);
+    const sigma = st0.sigma > 0 ? st0.sigma : 1e-6;
+    const beta = rgbSoftening() * sigma, bp = rgbBlack() * sigma;
+    const Ip = Float32Array.from(I, (v) => v - bp);
+    const Iw = Math.max(pctl(sortedFinite(Ip, masked), rgbWhite()), beta * 1e-3);
+    const normK = 1 / Math.asinh(Iw / beta);
+    // A channel significantly BELOW the sky (< -3 sigma of that channel) is
+    // not a colour: next to bright stars it is the negative lobe of the
+    // Lanczos-3 resampling kernel. Clipping it to 0 would paint the pixel in
+    // the pure colour of the other channel, so such pixels are drawn
+    // neutral (grey at their intensity) and counted.
+    const negLimit = [r, g, b].map((arr) => -3 * (robustStats(arr, masked).sigma || 0));
+    const rgba = new Uint8ClampedArray(N * 4);
+    let nMasked = 0, nNeutral = 0, nSatMasked = 0;
+    for (let i = 0; i < N; i++) {
+      const ay = Math.floor(i / W), ax = i - ay * W;
+      const o = ((H - 1 - ay) * W + ax) * 4;
+      if (masked[i]) {
+        // neutral checker; saturation-flagged pixels lighter, with a cross-hatch drawn on top
+        const c = masked[i] === 2 ? ((ax + ay) % 2 ? 150 : 175) : ((ax + ay) % 2 ? 92 : 118);
+        rgba[o] = c; rgba[o + 1] = c; rgba[o + 2] = c; rgba[o + 3] = 255;
+        if (masked[i] === 2) nSatMasked++; else nMasked++;
+        continue;
+      }
+      let R = 0, G = 0, B = 0;
+      if ((r[i] < negLimit[0] || g[i] < negLimit[1] || b[i] < negLimit[2]) && Math.max(r[i], g[i], b[i]) > 0) {
+        const v = Ip[i] > 0 ? Math.min(1, Math.asinh(Ip[i] / beta) * normK) : 0;
+        const q = Math.round(255 * v);
+        rgba[o] = q; rgba[o + 1] = q; rgba[o + 2] = q; rgba[o + 3] = 255;
+        nNeutral++;
+        continue;
+      }
+      if (Ip[i] > 0 && I[i] > 0) {
+        const k = (Math.asinh(Ip[i] / beta) * normK) / I[i];
+        R = Math.max(r[i], 0) * k; G = Math.max(g[i], 0) * k; B = Math.max(b[i], 0) * k;
+        const m = Math.max(R, G, B);
+        if (m > 1) { R /= m; G /= m; B /= m; }
+      }
+      rgba[o] = Math.round(255 * R); rgba[o + 1] = Math.round(255 * G); rgba[o + 2] = Math.round(255 * B); rgba[o + 3] = 255;
+    }
+
+    // overlays: the detections of the selected detector series in THIS epoch
+    const g0 = asg.group;
+    rgb.overlayFrameIdx = null;
+    state.frames.forEach((f, k) => {
+      if (f.timeMjdMean >= g0.tMin - RGB_SIMULTANEOUS_DAYS && f.timeMjdMean <= g0.tMax + RGB_SIMULTANEOUS_DAYS) rgb.overlayFrameIdx = k;
+    });
+
+    const chans = [["R", "Red", map.R, chR], ["G", "Green", map.G, chG], ["B", "Blue", map.B, chB]];
+    state.lastRenderedGrid = {
+      width: W, height: H, values: r, frame: map.R[0], wcsFrame: map.R[0],
+      rgb: { channels: chans.map(([c, , m, ch]) => ({ c, label: m === "blend" ? "50/50 blend" : m.map((f) => f.detectors[0]).join("+"), values: ch ? ch.values : null })), masked },
+    };
+    paintRgba(W, H, rgba, map.R[0], (zoom) => {
+      if (zoom < 3) return;
+      canvasCtx.strokeStyle = "rgba(40,40,40,0.9)"; canvasCtx.lineWidth = 1;
+      canvasCtx.beginPath();
+      for (let i = 0; i < N; i++) {
+        if (!masked[i]) continue;
+        const ay = Math.floor(i / W), ax = i - ay * W, x = ax * zoom, y = (H - 1 - ay) * zoom;
+        canvasCtx.moveTo(x, y + zoom); canvasCtx.lineTo(x + zoom, y);
+        if (masked[i] === 2) { canvasCtx.moveTo(x, y); canvasCtx.lineTo(x + zoom, y + zoom); }   // X = saturation-flagged
+      }
+      canvasCtx.stroke();
+    });
+
+    // ---- legend: exact mapping, stretch, warnings
+    const desc = (m) => m === "blend" ? "50/50 blend of the red and blue inputs"
+      : m.map((f) => `${f.centralWavelengthUm.toFixed(2)} µm (${f.detectors[0]}, MJD ${f.timeMjdMean.toFixed(2)})`).join(" + ") + (m.length > 1 ? ", averaged" : "");
+    const mapLine = el("p", null, "rgb-map");
+    [["Red", "#ff6b6b", map.R], ["Green", "#7CFC9A", map.G], ["Blue", "#5fb0ff", map.B]].forEach(([n, col, m], k) => {
+      const sp = el("span", `${n}: ${desc(m)}`);
+      sp.style.color = col;
+      mapLine.appendChild(sp);
+      if (k < 2) mapLine.appendChild(document.createTextNode("  ·  "));
+    });
+    rgbLegend.appendChild(mapLine);
+    rgbLegend.appendChild(el("p", "False-colour representation of near-infrared wavelengths (not human-visible colour). Bluer = relatively brighter at the shorter wavelength.", "rgb-note"));
+    rgbLegend.appendChild(el("p", "The PSF is larger at longer wavelengths and the images are not PSF-matched, so stars show redder halos and bluer cores; read colours from the core of a source, and treat coloured rings around bright stars as optics and resampling, not as structure.", "status-text"));
+    rgbLegend.appendChild(el("p", perChannel
+      ? `Per-channel normalised asinh: each channel is first divided by its own 99.5th percentile (${Object.entries(scales).map(([k, v]) => `${k} ${v.toPrecision(3)} MJy/sr`).join(", ")}). This enhances contrast; colours do NOT show true flux ratios between wavelengths.`
+      : `Colour-preserving asinh (Lupton et al. 2004) on background-subtracted surface brightness (MJy/sr): R:G:B ratios follow the measured ratios between wavelengths. Softening β = ${rgbSoftening().toFixed(1)}σ, black point ${rgbBlack().toFixed(1)}σ, white at the ${rgbWhite().toFixed(1)}th percentile of intensity (σ = ${sigma.toPrecision(2)} MJy/sr, the sky noise of the mean channel).`,
+      "status-text"));
+    const warnings = [];
+    const used = chans.filter(([, , m]) => m !== "blend").flatMap(([, , m]) => m);
+    const ts = used.map((f) => f.timeMjdMean);
+    const spread = Math.max(...ts) - Math.min(...ts);
+    const epochsUsed = new Set(used.map((f) => groups.findIndex((gg) => gg.frames.includes(f))));
+    if (epochsUsed.size > 1) warnings.push(`CROSS-EPOCH: the channels come from different epochs (${spread.toFixed(0)} days apart). Any brightness change between those dates appears as a colour difference; this is not a single-time colour image.`);
+    else if (spread > RGB_SIMULTANEOUS_DAYS) warnings.push(`The channels were observed ${spread.toFixed(1)} days apart within one epoch, so they are not simultaneous; a source varying on that timescale can change colour.`);
+    if (asg.anyManual) warnings.push("Manual channel selection is active.");
+    if (nNeutral) warnings.push(`${nNeutral} pixel(s) are drawn without colour (neutral grey): one channel is significantly below the sky there (< −3σ), typically the negative ringing lobe of the resampling kernel beside a bright star. They have no meaningful colour (not blue or red).`);
+    if (nSatMasked) warnings.push(`${nSatMasked} pixel(s) are cross-hatched (light grey, ✕): at least one channel there is built from saturated or non-linear data (OVERFLOW, BLOOM or NONLINEAR in at least one exposure). Their colour would be wrong, so none is shown.`);
+    if (nMasked) warnings.push(`${nMasked} pixel(s) are grey-hatched (dark grey, /): at least one channel has no data there (blank pixel) or only a value interpolated for display (typically a saturated or flagged core). They are not drawn as zero flux in that channel.`);
+    for (const [, n, m, ch] of chans) {
+      if (!ch) continue;
+      for (const d of ch.diag) {
+        const det = d.frame.detectors[0];
+        if (d.nInterp) warnings.push(`${n} (${det}): ${d.nInterp} pixel(s) interpolated for display at a bright core: saturated or flagged data, masked in the composite.`);
+        if (d.sat.length && !d.hasMask) warnings.push(`${n} (${det}): the input exposures carry ${d.sat.map(([k, c]) => `${k} ${c}`).join(", ")} flagged pixel(s), but this frame has no per-pixel saturation mask (cached before it existed: clear the cache and search again), so the brightest stars' colours may be unreliable even where not hatched.`);
+        else if (d.nSat) warnings.push(`${n} (${det}): ${d.nSat} grid pixel(s) flagged for saturation or non-linearity (native flags: ${d.sat.map(([k, c]) => `${k} ${c}`).join(", ")}).`);
+      }
+    }
+    if (warnings.length) {
+      const box = el("div", null, "rgb-warning");
+      box.appendChild(el("strong", "⚠ Check before interpreting colours"));
+      const ul = el("ul");
+      warnings.forEach((w) => ul.appendChild(el("li", w)));
+      box.appendChild(ul);
+      rgbLegend.appendChild(box);
+    }
+    const seriesNote = currentSeriesAnalysis() ? ` Circles: tracked sources of the ${detectorViewSelect.value} series in this epoch.` : "";
+    frameLabel.textContent =
+      `False-colour IR composite, epoch ${g0.index + 1}/${groups.length}: ${fmtDate(g0.tMin)}${g0.tMax - g0.tMin > 0.5 ? `…${fmtDate(g0.tMax)}` : ""}\n` +
+      `${asg.bands || "?"} band(s) this epoch; ${perChannel ? "per-channel normalised" : "colour-preserving"} asinh.${seriesNote}`;
+  }
+
+  function rgbStep(d) {
+    const groups = rgbEpochGroups(rgbFrames());
+    if (!groups.length) return;
+    rgb.epochIndex = (rgb.epochIndex + d + groups.length) % groups.length;
+    rgbEpochSelect.value = String(rgb.epochIndex);
+    renderView();
+  }
+  function stopRgbPlay() {
+    if (rgb.timer) { clearInterval(rgb.timer); rgb.timer = null; }
+    rgbPlayBtn.textContent = "▶ Blink epochs";
+  }
+  rgbPlayBtn.addEventListener("click", () => {
+    if (rgb.timer) { stopRgbPlay(); return; }
+    rgbPlayBtn.textContent = "⏸ Stop";
+    const speed = parseInt(speedSlider.value, 10);
+    rgb.timer = setInterval(() => rgbStep(1), Math.max(300, 1500 - speed * 110));
+  });
+  rgbPrevBtn.addEventListener("click", () => { stopRgbPlay(); rgbStep(-1); });
+  rgbNextBtn.addEventListener("click", () => { stopRgbPlay(); rgbStep(1); });
+  rgbEpochSelect.addEventListener("change", () => { stopRgbPlay(); rgb.epochIndex = parseInt(rgbEpochSelect.value, 10) || 0; renderView(); });
+  [rgbStretchMode, rgbManual.R, rgbManual.G, rgbManual.B].forEach((c) => c.addEventListener("change", renderView));
+  [rgbSoftSlider, rgbBlackSlider, rgbWhiteSlider].forEach((c) => c.addEventListener("input", renderView));
+
+  // ---------------------------------------------------------------------
   // Playback
   // ---------------------------------------------------------------------
   function stopPlayback() {
@@ -2289,7 +2723,11 @@
   viewModeSelect.addEventListener("change", () => {
     const isDiff = viewModeSelect.value === "difference";
     const isBlink = viewModeSelect.value === "blink";
+    const isRgb = viewModeSelect.value === "rgb";
     abPick.hidden = !isDiff;
+    rgbControls.hidden = !isRgb;
+    rgbLegend.hidden = !isRgb;
+    if (!isRgb) stopRgbPlay();
     setPlaybackControlsEnabled(isBlink);
     if (!isBlink) stopPlayback();
     renderView();
@@ -2299,6 +2737,12 @@
 
   document.addEventListener("keydown", (ev) => {
     if (document.activeElement === positionInput) return;
+    if (viewModeSelect.value === "rgb" && (ev.key === "ArrowRight" || ev.key === "ArrowLeft")) {
+      ev.preventDefault();
+      stopRgbPlay();
+      rgbStep(ev.key === "ArrowRight" ? 1 : -1);
+      return;
+    }
     if (ev.key === " ") {
       ev.preventDefault();
       state.playing ? stopPlayback() : startPlayback();

@@ -122,14 +122,17 @@ def run_cached(
         def _unavailable(*a, **k):
             raise stream_mod.CatalogError("catalogue queries disabled for offline run")
         stream_mod.gaia_sources = stream_mod.catwise_sources = _unavailable
+    from .localdata import no_fallback
+
     try:
-        for item in stream_frames(resolved, manifest["fov_arcmin"], detectors, mode, analyze=analyze,
-                                  records_override=records, cutout_source=source, exposure_sink=run.exposures,
-                                  shiftstack=shiftstack, spectrotemporal=spectrotemporal):
-            if isinstance(item, dict):
-                run.analysis = item
-            elif isinstance(item, EncodedFrame):
-                run.frames.append(item.metadata)
+        with no_fallback():
+            for item in stream_frames(resolved, manifest["fov_arcmin"], detectors, mode, analyze=analyze,
+                                      records_override=records, cutout_source=source, exposure_sink=run.exposures,
+                                      shiftstack=shiftstack, spectrotemporal=spectrotemporal):
+                if isinstance(item, dict):
+                    run.analysis = item
+                elif isinstance(item, EncodedFrame):
+                    run.frames.append(item.metadata)
     finally:
         stream_mod.gaia_sources, stream_mod.catwise_sources = saved
         catalogs_mod.CONE_OVERRIDE = saved_override

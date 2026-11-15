@@ -296,3 +296,17 @@ button#clear-cache-btn {
 .st-tooltip .st-tt-k { color: var(--text-dim); display: inline-block; min-width: 58px; }
 .st-metric { border-left: 3px solid var(--panel-border); padding: 2px 8px; margin: 6px 0; font-size: 13px; }
 .st-metric p { margin: 2px 0; }
+
+/* False-colour IR composite */
+.rgb-controls { display: flex; flex-direction: column; gap: 6px; margin: 6px 0; font-size: 12.5px; }
+.rgb-row { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; }
+.rgb-legend { font-size: 12.5px; margin: 6px 0; max-width: 960px; }
+.rgb-legend p { margin: 3px 0; }
+.rgb-map { font-weight: 600; }
+.rgb-note { font-style: italic; color: var(--text-dim); }
+.rgb-warning { border-left: 3px solid #e6a23c; background: rgba(230, 162, 60, 0.08); padding: 4px 10px; margin: 6px 0; }
+.rgb-warning ul { margin: 4px 0; padding-left: 18px; }
+
+/* Data source (app/localdata.py): shown whenever pixels or catalogue rows come from the local copy */
+.data-source-banner { border: 1px solid #c7a6ff; background: rgba(199, 166, 255, 0.10); color: var(--text); padding: 6px 10px; margin: 0 0 8px; border-radius: 4px; font-size: 13px; }
+.data-source-banner strong { color: #c7a6ff; }

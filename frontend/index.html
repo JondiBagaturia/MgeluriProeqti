@@ -61,11 +61,40 @@
           <option value="difference">Difference (B − A)</option>
           <option value="sum">Mean of all epochs</option>
           <option value="shiftstack">Shift-and-stack S/N map</option>
+          <option value="rgb">False-colour IR (RGB)</option>
         </select>
       </label>
       <div id="ab-pick" hidden>
         <label>Frame A <input id="diff-a-slider" type="range" min="0" max="0" value="0"></label>
         <label>Frame B <input id="diff-b-slider" type="range" min="0" max="0" value="0"></label>
+      </div>
+      <div id="rgb-controls" class="rgb-controls" hidden>
+        <div class="rgb-row">
+          <label>Epoch <select id="rgb-epoch-select"></select></label>
+          <button id="rgb-prev" type="button" title="Previous epoch (←)">◀</button>
+          <button id="rgb-next" type="button" title="Next epoch (→)">▶</button>
+          <button id="rgb-play" type="button" title="Step through the epochs to compare their false colour">▶ Blink epochs</button>
+        </div>
+        <div class="rgb-row">
+          <label>Stretch <select id="rgb-stretch-mode">
+            <option value="colour" selected>Colour-preserving asinh (true flux ratios)</option>
+            <option value="per_channel">Per-channel normalised asinh (contrast, not flux ratios)</option>
+          </select></label>
+        </div>
+        <div class="rgb-row">
+          <label title="asinh softening β in units of the sky noise: small = more compression of bright sources, faint ones brighter">Softening <input id="rgb-soft-slider" type="range" min="0" max="100" value="33"> <span id="rgb-soft-value"></span></label>
+          <label title="Black point in units of the sky noise">Black point <input id="rgb-black-slider" type="range" min="-2" max="5" step="0.1" value="0.5"> <span id="rgb-black-value"></span></label>
+          <label title="Intensity percentile mapped to full brightness">White <input id="rgb-white-slider" type="range" min="95" max="100" step="0.1" value="99.7"> <span id="rgb-white-value"></span></label>
+        </div>
+        <details>
+          <summary>Manual channels (advanced)</summary>
+          <div class="rgb-row">
+            <label>Red <select id="rgb-r-select"><option value="auto">Auto</option></select></label>
+            <label>Green <select id="rgb-g-select"><option value="auto">Auto</option></select></label>
+            <label>Blue <select id="rgb-b-select"><option value="auto">Auto</option></select></label>
+          </div>
+          <p class="status-text">Frames from different epochs can be combined here for inspection; the legend then shows a cross-epoch warning.</p>
+        </details>
       </div>
       <p id="contamination-summary" class="status-text"></p>
       <p class="status-text">Differences are not PSF-matched and use nearest-pixel alignment: bright <em>stationary</em> stars also leave residuals. Compare a candidate with its neighbours before reading anything into it.</p>
@@ -115,6 +144,7 @@
   </aside>
 
   <main class="viewer-area">
+    <div id="data-source-banner" class="data-source-banner" hidden></div>
     <div id="progress-wrap" hidden>
       <div id="progress-bar"></div>
       <span id="progress-text"></span>
@@ -124,6 +154,7 @@
       <canvas id="viewer-canvas" width="400" height="400"></canvas>
       <div id="frame-label" class="frame-label"></div>
       <div id="pixel-readout" class="pixel-readout"></div>
+      <div id="rgb-legend" class="rgb-legend" hidden></div>
       <div id="empty-state" class="empty-state">
         Enter a position above (try "Barnard's star", "WISE J085510.83-071442.5", or "269.452 4.693") and press Go.
         For typed coordinates the app asks CatWISE2020 whether a known fast mover passed through them, and otherwise treats them as fixed. Entering a fast-moving object's <em>name</em> is more reliable (WISE 0855 is now ~2′ from its 2010 coordinates).
