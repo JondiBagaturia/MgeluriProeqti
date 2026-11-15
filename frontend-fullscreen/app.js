@@ -336,68 +336,62 @@
   // ---------------------------------------------------------------------
   // Automatic retry while the archive is down
   //
-  // IRSA's search service drops out for minutes at a time (the server then
-  // reports e.g. "SIA query failed: 502 Proxy Error"). Rather than leave
-  // the user pressing Go, a search that ended with an archive error and no
-  // frames is repeated on a slowing schedule, with a visible countdown and
-  // a way to stop. A new search (or Stop) cancels it.
+  // IRSA's search service drops out for a while at a time (the server then
+  // reports e.g. "SIA query failed: 502 Proxy Error"). A search that ended
+  // with an archive error and no frames is repeated quietly: the progress
+  // pill stays up as if the first attempt were still running, and nothing
+  // else appears on screen. Only when every retry has failed does a
+  // message come up, with a button to start over. A new search cancels it.
   // ---------------------------------------------------------------------
-  const RETRY_DELAYS_S = [5, 10, 15, 20, 30]; // then 30s between attempts
-  const MAX_AUTO_RETRIES = 60; // about half an hour in total
+  const RETRY_DELAYS_S = [3, 5, 8, 12, 15]; // pause before each automatic retry
+  const MAX_AUTO_RETRIES = RETRY_DELAYS_S.length; // 5 retries after the first attempt
 
   function cancelRetry() {
     if (state.retryTimer) {
-      clearInterval(state.retryTimer);
+      clearTimeout(state.retryTimer);
       state.retryTimer = null;
     }
   }
 
-  function showArchiveMessage(text, withStopButton) {
+  function showFetchProgress() {
+    emptyState.hidden = true;
+    progressWrap.hidden = false;
+    progressBar.style.width = "0%";
+    progressText.textContent = "Fetching from IRSA…";
+  }
+
+  function showArchiveFailure(request, generation, errorText) {
+    progressWrap.hidden = true;
     emptyState.textContent = "";
     const message = document.createElement("span");
-    message.textContent = text;
-    emptyState.appendChild(message);
-    if (withStopButton) {
-      const stopBtn = document.createElement("button");
-      stopBtn.type = "button";
-      stopBtn.className = "text-btn";
-      stopBtn.textContent = "Stop retrying";
-      stopBtn.addEventListener("click", () => {
-        cancelRetry();
-        showArchiveMessage("Stopped. Press Go to try again.", false);
-      });
-      emptyState.appendChild(stopBtn);
-    }
+    message.textContent =
+      `The IRSA archive is not answering right now.\n\nDetails: ${errorText.slice(0, 160)}`;
+    const againBtn = document.createElement("button");
+    againBtn.type = "button";
+    againBtn.className = "text-btn";
+    againBtn.textContent = "Try again";
+    againBtn.addEventListener("click", () => {
+      if (generation !== state.searchGeneration) return;
+      showFetchProgress();
+      streamFrames(request, generation, 1);
+    });
+    emptyState.append(message, againBtn);
     emptyState.hidden = false;
-    return message;
   }
 
   function scheduleRetry(request, generation, attempt, errorText) {
     cancelRetry();
-    progressWrap.hidden = true;
-    const details = `Details: ${errorText.slice(0, 160)}`;
-    if (attempt >= MAX_AUTO_RETRIES) {
-      showArchiveMessage(`The IRSA archive has not answered after ${attempt} attempts. Press Go to try again later.\n\n${details}`, false);
+    const retriesDone = attempt - 1;
+    if (retriesDone >= MAX_AUTO_RETRIES) {
+      showArchiveFailure(request, generation, errorText);
       return;
     }
-    let secondsLeft = RETRY_DELAYS_S[Math.min(attempt - 1, RETRY_DELAYS_S.length - 1)];
-    const text = () =>
-      `The IRSA archive is not answering (attempt ${attempt}). Trying again in ${secondsLeft} s.\n\n${details}`;
-    const message = showArchiveMessage(text(), true);
-    state.retryTimer = setInterval(() => {
-      if (generation !== state.searchGeneration) return cancelRetry();
-      secondsLeft -= 1;
-      if (secondsLeft > 0) {
-        message.textContent = text();
-        return;
-      }
-      cancelRetry();
-      emptyState.hidden = true;
-      progressWrap.hidden = false;
-      progressBar.style.width = "0%";
-      progressText.textContent = `Fetching from IRSA… (attempt ${attempt + 1})`;
+    showFetchProgress(); // same pill as the first attempt: the wait is not announced
+    state.retryTimer = setTimeout(() => {
+      state.retryTimer = null;
+      if (generation !== state.searchGeneration) return;
       streamFrames(request, generation, attempt + 1);
-    }, 1000);
+    }, RETRY_DELAYS_S[retriesDone] * 1000);
   }
 
   function reviveFrame(stored) {
@@ -406,7 +400,7 @@
 
   async function streamFrames(request, generation, attempt) {
     const { position, fov, detectors, mode, quality, cacheKey } = request;
-    const url = `${API_BASE}/api/frames?position=${encodeURIComponent(position)}&fov=${fov}&detectors=${detectors.join(",")}&group=${mode}&quality=${quality}`;
+    const url = `${API_BASE}/api/frames?position=${encodeURIComponent(position)}&fov=${fov}&detectors=${detectors.join(",")}&group=${mode}&quality=${quality}&progress=1`;
     let resp;
     try {
       // no-store: the server marks this response cacheable for 5 minutes
@@ -429,6 +423,26 @@
     let nGroups = null;
     let received = 0;
     let firstFrameShown = false;
+    let download = null; // latest {"progress": ...} line: images downloaded / failed / total
+
+    // A frame is only complete once every exposure of its epoch is in, which
+    // can take minutes - so the bar follows the individual image downloads
+    // (when the server reports them) and the text gives both counts.
+    const showProgress = () => {
+      const framesText = nGroups ? `${received} / ${nGroups} frame(s) ready` : `${received} frame(s) ready`;
+      if (download && download.total > 0) {
+        const finished = download.downloaded + download.failed;
+        const percent = Math.floor((download.downloaded / download.total) * 100);
+        progressBar.style.width = `${Math.min(100, (finished / download.total) * 100)}%`;
+        let text = `${download.downloaded} / ${download.total} images downloaded (${percent}%)`;
+        if (download.failed) text += `, ${download.failed} failed`;
+        if (received) text += `, ${framesText}`;
+        progressText.textContent = text;
+      } else if (received) {
+        if (nGroups) progressBar.style.width = `${Math.min(100, (received / nGroups) * 100)}%`;
+        progressText.textContent = framesText;
+      }
+    };
     let streamError = null; // last {"error": ...} line the server sent, if any
 
     while (true) {
@@ -450,9 +464,15 @@
         } catch (e) {
           continue;
         }
+        if (obj.progress) {
+          download = obj.progress;
+          showProgress();
+          continue;
+        }
         if (obj.error) {
+          // Not shown here: with no frames it is retried quietly, with
+          // some frames it is reported once the stream ends (both below).
           streamError = obj.error;
-          progressText.textContent = `Error: ${obj.error}`;
           continue;
         }
         nGroups = obj.n_groups || nGroups;
@@ -477,12 +497,7 @@
         };
         state.frames.push(frame);
         received++;
-        if (nGroups) {
-          progressBar.style.width = `${Math.min(100, (received / nGroups) * 100)}%`;
-          progressText.textContent = `${received} / ${nGroups} frame(s) ready`;
-        } else {
-          progressText.textContent = `${received} frame(s) ready`;
-        }
+        showProgress();
         if (!firstFrameShown) {
           firstFrameShown = true;
           sortAndShowFirst();
@@ -512,8 +527,8 @@
     if (state.frames.length === 0) {
       // Two different situations end with nothing to show; say which one.
       // The server reported a failure (IRSA unreachable or busy): that is
-      // not "no images here", and trying again later usually works - so
-      // that case retries by itself (see scheduleRetry).
+      // not "no images here", and trying again shortly usually works - so
+      // that case retries by itself, quietly (see scheduleRetry).
       if (streamError) {
         scheduleRetry(request, generation, attempt, streamError);
         return;

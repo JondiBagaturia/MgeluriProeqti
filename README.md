@@ -100,9 +100,9 @@ server log.
   press Esc to close them.
 - Scroll to zoom. On a touch screen, the ☰ button in the corner opens and
   closes the windows.
-- If the IRSA archive is not answering, this design says so and retries by
-  itself with a visible countdown (the classic design does not retry on
-  its own).
+- If the IRSA archive is not answering, this design quietly retries up to
+  5 times before it reports the problem (the classic design does not retry
+  on its own).
 
 **Changing or adding a design**
 - Each design is a self-contained folder of static files (`index.html`,

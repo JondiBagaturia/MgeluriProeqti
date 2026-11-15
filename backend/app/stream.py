@@ -12,13 +12,14 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Iterator, Optional
+from dataclasses import dataclass
+from typing import Iterator, Optional, Union
 
 import numpy as np
 from astropy.time import Time
 
 from .coords import ResolvedPosition
-from .irsa import find_images, fetch_cutouts, DiscoveryError
+from .irsa import find_images, fetch_cutouts, DiscoveryError, FetchFailure
 from .pipeline import (
     make_target_wcs,
     process_cutout,
@@ -35,6 +36,17 @@ from .config import get_config
 log = logging.getLogger(__name__)
 
 
+@dataclass
+class DownloadProgress:
+    """How far the cutout downloads of one request have got. Frames only
+    appear once a whole group is in, which can take minutes - this is what
+    lets the browser show "41 of 70 images" in the meantime."""
+
+    n_downloaded: int
+    n_failed: int
+    n_total: int
+
+
 def stream_frames(
     resolved: ResolvedPosition,
     fov_arcmin: float,
@@ -42,7 +54,11 @@ def stream_frames(
     mode: str,
     resolve_seconds: float = 0.0,
     max_exposures_per_group: Optional[int] = None,
-) -> Iterator[EncodedFrame]:
+    report_progress: bool = False,
+) -> Iterator[Union[EncodedFrame, DownloadProgress]]:
+    """Yields each EncodedFrame as soon as it is ready. With
+    `report_progress=True`, DownloadProgress items are yielded in between:
+    one right after discovery (0 of N) and one per finished download."""
     t_start = time.time()
     stats = _TimingStats(resolve_s=resolve_seconds)
 
@@ -87,11 +103,24 @@ def stream_frames(
     pending: dict[int, dict[int, ProcessedCutout]] = {gi: {} for gi in range(len(groups))}
     emitted: set[int] = set()
     n_fetched = 0
+    n_failed = 0
     n_frames_emitted = 0
+    n_to_fetch = len(records_to_fetch)
+
+    if report_progress:
+        yield DownloadProgress(0, 0, n_to_fetch)
 
     t_fetch_start = time.time()
-    for cutout in fetch_cutouts(records_to_fetch, centred_coord, fov_arcmin=fov_arcmin):
+    for cutout in fetch_cutouts(
+        records_to_fetch, centred_coord, fov_arcmin=fov_arcmin, yield_failures=report_progress
+    ):
+        if isinstance(cutout, FetchFailure):
+            n_failed += 1
+            yield DownloadProgress(n_fetched, n_failed, n_to_fetch)
+            continue
         n_fetched += 1
+        if report_progress:
+            yield DownloadProgress(n_fetched, n_failed, n_to_fetch)
         stats.record_fetch(cutout)
 
         t0 = time.time()

@@ -13,6 +13,7 @@ PLAN.md Phase 0 decisions baked in here:
 from __future__ import annotations
 
 import io
+import math
 import time
 import random
 import logging
@@ -137,8 +138,19 @@ class Cutout:
     fetch_seconds: float = 0.0  # this cutout's successful attempt only, not retries/backoff
 
 
+# IRSA cuts a square of the requested size out of the *detector's* pixel
+# grid, and the detector sits at whatever angle the spacecraft had on the
+# sky for that exposure (27 deg from north for eps Ind B, for instance). A
+# rotated square of side `fov` leaves the corners of our north-up `fov`
+# grid empty - up to 17% of it. Asking for the diagonal instead (sqrt(2),
+# plus a little slack for the pixel grid) covers the whole grid at any
+# angle. It costs little: nearly all of a cutout's bytes are the EPSF
+# table, which does not grow with the requested size.
+_CUTOUT_PAD = math.sqrt(2) * 1.03
+
+
 def _cutout_url(record: ImageRecord, coord: SkyCoord, fov_arcmin: float) -> str:
-    size_deg = fov_arcmin / 60.0
+    size_deg = fov_arcmin * _CUTOUT_PAD / 60.0
     return f"{record.access_url}?center={coord.ra.deg},{coord.dec.deg}d&size={size_deg}"
 
 
@@ -193,10 +205,23 @@ def _fetch_one(record: ImageRecord, coord: SkyCoord, fov_arcmin: float, session:
     raise DiscoveryError(f"Cutout fetch failed after {cfg.max_retries} retries: {url} ({last_exc})")
 
 
-def fetch_cutouts(records: list[ImageRecord], coord: SkyCoord, fov_arcmin: float):
+@dataclass
+class FetchFailure:
+    """A cutout that could not be downloaded (only yielded on request, see
+    fetch_cutouts)."""
+
+    record: ImageRecord
+    error: str
+
+
+def fetch_cutouts(records: list[ImageRecord], coord: SkyCoord, fov_arcmin: float, yield_failures: bool = False):
     """Fetch cutouts for `records` with bounded concurrency, yielding each
     Cutout as soon as it's ready (order not guaranteed) so callers can start
     streaming/combining before the whole batch finishes.
+
+    A download that fails after its retries is skipped. With
+    `yield_failures=True` a FetchFailure is yielded in its place, so a
+    caller counting progress can tell "still downloading" from "gave up".
     """
     cfg = get_config().fetch
     session = requests.Session()
@@ -211,4 +236,6 @@ def fetch_cutouts(records: list[ImageRecord], coord: SkyCoord, fov_arcmin: float
                 yield future.result()
             except Exception as exc:  # noqa: BLE001
                 log.warning("Skipping %s after fetch failure: %s", record.obs_id, exc)
+                if yield_failures:
+                    yield FetchFailure(record=record, error=str(exc))
                 continue

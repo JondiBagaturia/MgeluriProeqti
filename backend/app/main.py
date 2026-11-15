@@ -19,7 +19,7 @@ from starlette.concurrency import run_in_threadpool
 
 from .coords import parse_position, CoordParseError, ResolvedPosition
 from .irsa import find_images, discover_collections, DiscoveryError
-from .stream import stream_frames
+from .stream import stream_frames, DownloadProgress
 from .spectrum import compute_spectrum
 from .cache import TTLDedupeCache
 from .config import get_config
@@ -136,6 +136,7 @@ async def frames(
     detectors: Optional[str] = Query(None, description="Comma-separated, e.g. D6,D2"),
     group: str = Query("epoch", pattern="^(epoch|detector_epoch|single)$"),
     quality: Optional[str] = Query(None, pattern="^(low|mid|high)$", description="Max exposures/group: low=fast, high=full quality"),
+    progress: bool = Query(False, description="Also send download-progress lines between the frames"),
 ):
     """NDJSON stream: one processed, combined frame per line, as soon as
     each is ready. Each line carries width/height/scale/offset + a base64
@@ -143,7 +144,13 @@ async def frames(
 
     `quality` trades S/N for speed by capping exposures fetched per group
     (see app/pipeline.py's cap_group_indices) - applied before fetching,
-    since that's ~97% of request time, not after."""
+    since that's ~97% of request time, not after.
+
+    With `progress=1` the stream also carries lines of the form
+    {"progress": {"downloaded": 41, "failed": 1, "total": 70}} - one after
+    discovery and one per finished cutout download - so a client can show
+    how far along it is before the first frame is complete. Off by default,
+    so clients that expect every line to be a frame keep working."""
     t0 = time.time()
     resolved = await run_in_threadpool(_resolve_or_400, position)
     resolve_seconds = time.time() - t0
@@ -153,7 +160,19 @@ async def frames(
 
     def generate():
         try:
-            for encoded in stream_frames(resolved, fov_arcmin, det_list, group, resolve_seconds, max_exposures):
+            for encoded in stream_frames(
+                resolved, fov_arcmin, det_list, group, resolve_seconds, max_exposures, report_progress=progress
+            ):
+                if isinstance(encoded, DownloadProgress):
+                    line = {
+                        "progress": {
+                            "downloaded": encoded.n_downloaded,
+                            "failed": encoded.n_failed,
+                            "total": encoded.n_total,
+                        }
+                    }
+                    yield (json.dumps(line) + "\n").encode("utf-8")
+                    continue
                 line = {
                     "width": encoded.width,
                     "height": encoded.height,
