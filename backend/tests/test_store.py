@@ -67,3 +67,23 @@ def test_list_orders_by_score_and_no_votes_means_no_agreement(db):
     assert rows[0]["classifications"]["n_voters"] == 0
     assert rows[0]["classifications"]["agreement_fraction"] is None
     assert len(store.list_candidates(min_score=0.5)) == 1
+
+
+def test_spectrotemporal_results_need_no_schema_change(db):
+    """Phase 3: spectro-temporal results travel in the analysis record, not in the
+    candidates table. Storing an analysis that contains them leaves the schema and
+    the stored summaries unchanged (no migration; old rows stay readable)."""
+    import sqlite3
+    from app.main import _store_candidates
+    old = store.upsert_candidate(_track(ra=101.0))                  # a row written before Phase 3
+    analysis = {"series": [{"tracks": [_track(ra=100.0)]}],
+                "spectrotemporal": {"sources": [{"id": "target", "measurements": [{"flux_mjy": 1.0}] * 50}]}}
+    _store_candidates(analysis, "field")
+    assert "store_error" not in analysis
+    new_id = analysis["series"][0]["tracks"][0]["candidate_id"]
+    got = store.get_candidate(new_id)
+    assert "spectrotemporal" not in got["summary"] and "measurements" not in got["summary"]
+    assert store.get_candidate(old)["anomaly_score"] == 0.4
+    cols = {r[1] for r in sqlite3.connect(str(db / "test.sqlite")).execute("PRAGMA table_info(candidates)")}
+    assert cols == {"id", "series", "ra_deg", "dec_deg", "field_query", "label", "anomaly_score", "reliability",
+                    "summary_json", "created_at", "updated_at"}

@@ -6,10 +6,15 @@
  * the dock itself, or while a control inside is being used from the
  * keyboard. Two game-menu conventions sit on top of that: a window's pin
  * square keeps it open, and right-clicking the sky toggles "menu mode"
- * (every window open at once, Esc to leave). A fifth window, Tracked
- * sources, opens from its button in the bottom bar. This file only toggles
- * body.show-<edge> / body.show-all / body.show-sources classes - all
- * visuals are in style.css, all viewer logic stays in app.js.
+ * (every window open at once, Esc to leave). Two more windows, Tracked
+ * sources and Spectro-temporal analysis, open from buttons in the bottom
+ * bar; they float - drag the title bar to move one, drag any edge or
+ * corner to resize it, double-click the title bar to put it back - and
+ * their content is split into tabs. The two side windows can be made
+ * wider or narrower from their inner edge. Sizes and positions are
+ * remembered in this browser. This file only toggles classes on <body>
+ * and sets window geometry - all visuals are in style.css, all viewer
+ * logic stays in app.js.
  */
 (function () {
   "use strict";
@@ -120,7 +125,7 @@
     if (ev.key !== "Escape") return;
     pinned.right = false;
     body.classList.remove("show-all");
-    setSourcesOpen(false);
+    closeAllFloating();
     if (document.activeElement && document.activeElement !== body) document.activeElement.blur();
     update();
   });
@@ -142,18 +147,186 @@
     dismissHint();
   });
 
-  // --- Tracked sources window: opened on request, not by an edge ----------
-  // (its table needs the middle of the screen). The Sources button in the
-  // bottom bar toggles it; its closing square and Esc close it. While it is
-  // open the bottom bar stays up with it (style.css).
-  const sourcesBtn = document.getElementById("sources-btn");
-  function setSourcesOpen(open) {
-    body.classList.toggle("show-sources", open);
-    sourcesBtn.setAttribute("aria-pressed", String(open));
-    if (open) dismissHint();
+  // --- Stored window geometry ---------------------------------------------
+  const store = {
+    get(key) {
+      try {
+        return JSON.parse(localStorage.getItem(`spherex-ui-${key}`));
+      } catch (e) {
+        return null; // storage unavailable or damaged: fall back to the defaults
+      }
+    },
+    set(key, value) {
+      try {
+        if (value == null) localStorage.removeItem(`spherex-ui-${key}`);
+        else localStorage.setItem(`spherex-ui-${key}`, JSON.stringify(value));
+      } catch (e) {
+        /* not remembered, still usable */
+      }
+    },
+  };
+
+  /** Pointer drag helper: calls onMove(dx, dy) while the button is held. */
+  function dragFrom(el, onStart, onMove, onEnd) {
+    el.addEventListener("pointerdown", (down) => {
+      if (down.button !== 0 || down.target.closest("button, input, select, label, a")) return;
+      down.preventDefault();
+      el.setPointerCapture(down.pointerId);
+      const start = onStart();
+      const move = (ev) => onMove(start, ev.clientX - down.clientX, ev.clientY - down.clientY);
+      const up = () => {
+        el.removeEventListener("pointermove", move);
+        el.removeEventListener("pointerup", up);
+        el.removeEventListener("pointercancel", up);
+        if (onEnd) onEnd();
+      };
+      el.addEventListener("pointermove", move);
+      el.addEventListener("pointerup", up);
+      el.addEventListener("pointercancel", up);
+    });
   }
-  sourcesBtn.addEventListener("click", () => setSourcesOpen(!body.classList.contains("show-sources")));
-  document.getElementById("sources-close").addEventListener("click", () => setSourcesOpen(false));
+
+  // --- Floating windows: Tracked sources, Spectro-temporal analysis --------
+  // Opened on request rather than by an edge: a wide table or a plot needs
+  // the middle of the screen. Each can be moved (title bar) and resized
+  // (edges, corners), like a window in a game menu.
+  const FLOAT_MIN_W = 380;
+  const FLOAT_MIN_H = 220;
+  const SMALL_SCREEN = window.matchMedia("(max-width: 720px)");
+  const floats = [];
+  let topZ = 13;
+
+  function setupFloating(win) {
+    const id = win.dataset.window;
+    const showClass = `show-${id}`;
+    const buttons = document.querySelectorAll(`[data-toggle-window="${id}"]`);
+    const float = { win, id, setOpen, clamp };
+    floats.push(float);
+
+    const rectOf = () => {
+      const r = win.getBoundingClientRect();
+      return { left: r.left, top: r.top, width: r.width, height: r.height };
+    };
+    // Keeps a window inside the viewport and above its minimum size.
+    function place(r) {
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      const width = Math.min(Math.max(r.width, FLOAT_MIN_W), vw - 16);
+      const height = Math.min(Math.max(r.height, FLOAT_MIN_H), vh - 16);
+      const left = Math.min(Math.max(r.left, 8), vw - width - 8);
+      const top = Math.min(Math.max(r.top, 8), vh - height - 8);
+      Object.assign(win.style, { left: `${left}px`, top: `${top}px`, width: `${width}px`, height: `${height}px` });
+      win.classList.add("placed");
+    }
+    function clamp() {
+      if (!win.classList.contains("placed")) return;
+      if (SMALL_SCREEN.matches) return; // small screens use the fixed layout in style.css
+      place(rectOf());
+    }
+    function reset() {
+      win.classList.remove("placed");
+      ["left", "top", "width", "height"].forEach((k) => (win.style[k] = ""));
+      store.set(`window-${id}`, null);
+    }
+    const save = () => store.set(`window-${id}`, rectOf());
+
+    function setOpen(open) {
+      body.classList.toggle(showClass, open);
+      buttons.forEach((btn) => btn.setAttribute("aria-pressed", String(open)));
+      if (open) {
+        dismissHint();
+        win.style.zIndex = String(++topZ);
+        clamp();
+      }
+    }
+
+    const saved = store.get(`window-${id}`);
+    if (saved && !SMALL_SCREEN.matches && [saved.left, saved.top, saved.width, saved.height].every(Number.isFinite)) place(saved);
+
+    buttons.forEach((btn) => btn.addEventListener("click", () => setOpen(!body.classList.contains(showClass))));
+    win.querySelectorAll("[data-close]").forEach((btn) => btn.addEventListener("click", () => setOpen(false)));
+    win.addEventListener("pointerdown", () => (win.style.zIndex = String(++topZ)), true); // clicked window comes to the front
+
+    // Move: drag the title bar. Double-click it to return to the default place and size.
+    const bar = win.querySelector("[data-drag]");
+    dragFrom(bar, rectOf, (start, dx, dy) => place({ ...start, left: start.left + dx, top: start.top + dy }), save);
+    bar.addEventListener("dblclick", (ev) => {
+      if (!ev.target.closest("button")) reset();
+    });
+
+    // Resize: a strip along each edge and a square on each corner.
+    for (const dir of ["n", "s", "e", "w", "ne", "nw", "se", "sw"]) {
+      const handle = document.createElement("div");
+      handle.className = `resize-handle rh-${dir}`;
+      win.appendChild(handle);
+      dragFrom(
+        handle,
+        rectOf,
+        (start, dx, dy) => {
+          const r = { ...start };
+          if (dir.includes("e")) r.width = Math.max(FLOAT_MIN_W, start.width + dx);
+          if (dir.includes("s")) r.height = Math.max(FLOAT_MIN_H, start.height + dy);
+          if (dir.includes("w")) {
+            r.width = Math.max(FLOAT_MIN_W, start.width - dx);
+            r.left = start.left + start.width - r.width;
+          }
+          if (dir.includes("n")) {
+            r.height = Math.max(FLOAT_MIN_H, start.height - dy);
+            r.top = start.top + start.height - r.height;
+          }
+          place(r);
+        },
+        save
+      );
+    }
+  }
+  document.querySelectorAll(".float-window").forEach(setupFloating);
+  function closeAllFloating() {
+    floats.forEach((f) => f.setOpen(false));
+  }
+  window.addEventListener("resize", () => floats.forEach((f) => f.clamp()));
+
+  // --- Tabs inside a window -------------------------------------------------
+  // Each tab button names the pane it shows (data-tab); panes are siblings
+  // inside the same window.
+  document.querySelectorAll(".tab-row").forEach((row) => {
+    const tabs = Array.from(row.querySelectorAll(".tab-btn"));
+    const select = (chosen) => {
+      for (const tab of tabs) {
+        const on = tab === chosen;
+        tab.setAttribute("aria-selected", String(on));
+        document.getElementById(tab.dataset.tab).hidden = !on;
+      }
+    };
+    tabs.forEach((tab) => tab.addEventListener("click", () => select(tab)));
+  });
+
+  // --- Side windows: width can be changed from the inner edge --------------
+  for (const [edge, dir] of [["left", "e"], ["right", "w"]]) {
+    const dock = docks[edge];
+    if (!dock) continue;
+    const apply = (w) => {
+      const width = Math.min(Math.max(w, 280), Math.max(280, window.innerWidth * 0.6));
+      dock.style.width = `${width}px`;
+      return width;
+    };
+    const saved = store.get(`dock-${edge}`);
+    if (Number.isFinite(saved) && !SMALL_SCREEN.matches) apply(saved);
+    const handle = document.createElement("div");
+    handle.className = `resize-handle rh-${dir}`;
+    dock.appendChild(handle);
+    let last = null;
+    dragFrom(
+      handle,
+      () => dock.getBoundingClientRect().width,
+      (startWidth, dx) => (last = apply(startWidth + (dir === "e" ? dx : -dx))),
+      () => store.set(`dock-${edge}`, last)
+    );
+    handle.addEventListener("dblclick", () => {
+      dock.style.width = "";
+      store.set(`dock-${edge}`, null);
+    });
+  }
 
   // --- States where hiding everything would leave the user stranded -------
 

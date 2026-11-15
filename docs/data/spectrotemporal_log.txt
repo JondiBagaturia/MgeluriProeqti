@@ -1,0 +1,117 @@
+
+== barnard: 36 exposures, 0 failed at caching, 5 reference stars; target states {'saturated': 16, 'valid_flagged': 14, 'masked': 2, 'off_image': 4}
+   coverage D3 epoch 0: 0/6 usable, no usable data, {'saturated': 6}
+   coverage D3 epoch 1: 0/6 usable, no usable data, {'saturated': 6}
+   coverage D3 epoch 2: 0/6 usable, no usable data, {'off_image': 2, 'saturated': 4}
+   coverage D6 epoch 0: 5/6 usable, 4.418-4.929 um, {'masked': 1, 'valid_flagged': 5}
+   coverage D6 epoch 1: 6/6 usable, 4.412-5.002 um, {'valid_flagged': 6}
+   coverage D6 epoch 2: 3/6 usable, 4.664-4.977 um, {'masked': 1, 'off_image': 2, 'valid_flagged': 3}
+   fit D3: none (not enough usable measurements)
+   fit D6: lambda0 4.589 um; a_e = [3365±1.2e+02, 3274±1e+02, 3511±1.2e+02] mJy; 4 shape knots; chi2/dof 22.8/8; adequate False; floor 2.5%
+   [all_usable] grey_variability D3: insufficient_data; stat — dof — p —; ref frac — -> inconclusive
+   [all_usable] slope_change D3: insufficient_data; stat — dof — p —; ref frac — -> inconclusive
+   [all_usable] matched_wavelength_pairs D3: insufficient_data; stat — dof — p —; ref frac — -> inconclusive
+   [all_usable] grey_variability D6: ok; stat 15.1 dof 2 p 0.000517; ref frac — -> inconclusive
+   [all_usable] slope_change D6: ok; stat 12.9 dof 2 p 0.00155; ref frac — -> inconclusive
+   [all_usable] matched_wavelength_pairs D6: ok; stat 6.76 dof 2 p 0.0341; ref frac 0 -> no_significant_change
+   [all_usable] colour_change None: insufficient_data; stat — dof — p —; ref frac — -> inconclusive
+   [unflagged_only] grey_variability D3: insufficient_data; stat — dof — p —; ref frac — -> inconclusive
+   [unflagged_only] slope_change D3: insufficient_data; stat — dof — p —; ref frac — -> inconclusive
+   [unflagged_only] matched_wavelength_pairs D3: insufficient_data; stat — dof — p —; ref frac — -> inconclusive
+   [unflagged_only] grey_variability D6: insufficient_data; stat — dof — p —; ref frac — -> inconclusive
+   [unflagged_only] slope_change D6: insufficient_data; stat — dof — p —; ref frac — -> inconclusive
+   [unflagged_only] matched_wavelength_pairs D6: insufficient_data; stat — dof — p —; ref frac — -> inconclusive
+   [unflagged_only] colour_change None: insufficient_data; stat — dof — p —; ref frac — -> inconclusive
+
+== eps_ind_b: 47 exposures, 1 failed at caching, 5 reference stars; target states {'off_image': 3, 'valid': 39, 'valid_flagged': 2, 'masked': 3}
+   coverage D3 epoch 0: 4/5 usable, 1.685-2.120 um, {'off_image': 1, 'valid': 4}
+   coverage D3 epoch 1: 6/6 usable, 1.638-2.291 um, {'valid': 6}
+   coverage D3 epoch 2: 6/6 usable, 1.805-2.271 um, {'valid': 6}
+   coverage D3 epoch 3: 6/6 usable, 1.722-2.374 um, {'valid': 6}
+   coverage D6 epoch 0: 4/6 usable, 4.431-4.764 um, {'off_image': 2, 'valid': 4}
+   coverage D6 epoch 1: 6/6 usable, 4.423-4.847 um, {'valid': 5, 'valid_flagged': 1}
+   coverage D6 epoch 2: 5/6 usable, 4.695-4.904 um, {'masked': 1, 'valid': 5}
+   coverage D6 epoch 3: 4/6 usable, 4.492-4.975 um, {'masked': 2, 'valid': 3, 'valid_flagged': 1}
+   fit D3: lambda0 1.934 um; a_e = [12.04±0.91, 11.73±0.85, 11.04±0.81, 12.61±0.86] mJy; 6 shape knots; chi2/dof 194.5/13; adequate False; floor 2.5%
+   fit D6: lambda0 4.645 um; a_e = [19.67±0.73, 18.9±0.65, 19.43±0.83, 16.8±0.74] mJy; 6 shape knots; chi2/dof 28.9/10; adequate False; floor 2.5%
+   [all_usable] grey_variability D3: ok; stat 58.5 dof 3 p 1.25e-12; ref frac — -> inconclusive
+   [all_usable] slope_change D3: ok; stat 28.1 dof 3 p 3.42e-06; ref frac — -> inconclusive
+   [all_usable] matched_wavelength_pairs D3: ok; stat 1.32 dof 6 p 0.97; ref frac 1 -> no_significant_change
+   [all_usable] grey_variability D6: ok; stat 51.3 dof 3 p 4.17e-11; ref frac — -> inconclusive
+   [all_usable] slope_change D6: ok; stat 9.5 dof 3 p 0.0234; ref frac — -> inconclusive
+   [all_usable] matched_wavelength_pairs D6: ok; stat 16.8 dof 3 p 0.000762; ref frac — -> conditional
+   [all_usable] colour_change ['D6', 'D3']: ok; stat 6.2 dof 3 p 0.102; ref frac — -> inconclusive
+   [unflagged_only] grey_variability D3: ok; stat 58.5 dof 3 p 1.25e-12; ref frac — -> inconclusive
+   [unflagged_only] slope_change D3: ok; stat 28.1 dof 3 p 3.42e-06; ref frac — -> inconclusive
+   [unflagged_only] matched_wavelength_pairs D3: ok; stat 1.32 dof 6 p 0.97; ref frac — -> no_significant_change
+   [unflagged_only] grey_variability D6: ok; stat 68.2 dof 3 p 1.05e-14; ref frac — -> inconclusive
+   [unflagged_only] slope_change D6: ok; stat 21.3 dof 3 p 9.33e-05; ref frac — -> inconclusive
+   [unflagged_only] matched_wavelength_pairs D6: ok; stat 16.8 dof 3 p 0.000762; ref frac — -> conditional
+   [unflagged_only] colour_change ['D6', 'D3']: ok; stat 6.46 dof 3 p 0.0912; ref frac — -> inconclusive
+
+== wise0855: 33 exposures, 0 failed at caching, 3 reference stars; target states {'below_threshold': 6, 'valid': 22, 'masked': 4, 'valid_flagged': 1}
+   coverage D5 epoch 0: 5/6 usable, 4.109-4.406 um, {'below_threshold': 1, 'valid': 5}
+   coverage D5 epoch 1: 4/6 usable, 3.822-4.225 um, {'below_threshold': 1, 'masked': 1, 'valid': 3, 'valid_flagged': 1}
+   coverage D5 epoch 2: 5/6 usable, 3.835-4.369 um, {'masked': 1, 'valid': 5}
+   coverage D6 epoch 0: 0/3 usable, no usable data, {'below_threshold': 3}
+   coverage D6 epoch 1: 3/6 usable, 4.418-4.805 um, {'below_threshold': 1, 'masked': 2, 'valid': 3}
+   coverage D6 epoch 2: 6/6 usable, 4.424-4.967 um, {'valid': 6}
+   fit D5: lambda0 4.247 um; a_e = [0.5211±0.088, 0.5906±0.088, 0.62±0.075] mJy; 4 shape knots; chi2/dof 10.0/8; adequate True; floor 2.5%
+   fit D6: lambda0 4.685 um; a_e = [0.6931±0.12, 0.6183±0.089] mJy; 3 shape knots; chi2/dof 3.5/5; adequate True; floor 2.5%
+   [all_usable] grey_variability D5: ok; stat 1.62 dof 2 p 0.444; ref frac — -> no_significant_change
+   [all_usable] slope_change D5: ok; stat 2.51 dof 2 p 0.286; ref frac — -> no_significant_change
+   [all_usable] matched_wavelength_pairs D5: ok; stat 0.953 dof 2 p 0.621; ref frac — -> no_significant_change
+   [all_usable] grey_variability D6: ok; stat 0.578 dof 1 p 0.447; ref frac — -> no_significant_change
+   [all_usable] slope_change D6: ok; stat 0.117 dof 1 p 0.732; ref frac — -> no_significant_change
+   [all_usable] matched_wavelength_pairs D6: ok; stat 0.155 dof 2 p 0.926; ref frac — -> no_significant_change
+   [all_usable] colour_change ['D6', 'D5']: ok; stat 0.294 dof 1 p 0.588; ref frac — -> no_significant_change
+   [unflagged_only] grey_variability D5: ok; stat 2.71 dof 2 p 0.258; ref frac — -> no_significant_change
+   [unflagged_only] slope_change D5: ok; stat 1.48 dof 2 p 0.477; ref frac — -> no_significant_change
+   [unflagged_only] matched_wavelength_pairs D5: ok; stat 0.953 dof 2 p 0.621; ref frac — -> no_significant_change
+   [unflagged_only] grey_variability D6: ok; stat 0.578 dof 1 p 0.447; ref frac — -> no_significant_change
+   [unflagged_only] slope_change D6: ok; stat 0.117 dof 1 p 0.732; ref frac — -> no_significant_change
+   [unflagged_only] matched_wavelength_pairs D6: ok; stat 0.155 dof 2 p 0.926; ref frac — -> no_significant_change
+   [unflagged_only] colour_change ['D6', 'D5']: ok; stat 0.148 dof 1 p 0.7; ref frac — -> no_significant_change
+
+== rw_aur: 36 exposures, 0 failed at caching, 10 reference stars; target states {'valid_flagged': 34, 'masked': 2}
+   coverage D3 epoch 0: 6/6 usable, 1.736-2.354 um, {'valid_flagged': 6}
+   coverage D3 epoch 1: 6/6 usable, 1.755-2.323 um, {'valid_flagged': 6}
+   coverage D3 epoch 2: 6/6 usable, 1.644-2.178 um, {'valid_flagged': 6}
+   coverage D6 epoch 0: 5/6 usable, 4.604-4.961 um, {'masked': 1, 'valid_flagged': 5}
+   coverage D6 epoch 1: 6/6 usable, 4.519-4.939 um, {'valid_flagged': 6}
+   coverage D6 epoch 2: 5/6 usable, 4.524-4.946 um, {'masked': 1, 'valid_flagged': 5}
+   fit D3: lambda0 1.934 um; a_e = [468±28, 535.2±28, 481±29] mJy; 6 shape knots; chi2/dof 114.8/10; adequate False; floor 2.5%
+   fit D6: lambda0 4.803 um; a_e = [2333±88, 1633±65, 1148±43] mJy; 5 shape knots; chi2/dof 41.3/9; adequate False; floor 2.5%
+   [all_usable] grey_variability D3: ok; stat 97.1 dof 2 p 8.2e-22; ref frac — -> inconclusive
+   [all_usable] slope_change D3: ok; stat 48.9 dof 2 p 2.42e-11; ref frac — -> inconclusive
+   [all_usable] matched_wavelength_pairs D3: ok; stat 68.5 dof 2 p 1.36e-15; ref frac 0 -> conditional
+   [all_usable] grey_variability D6: ok; stat 1.69e+03 dof 2 p 0; ref frac — -> inconclusive
+   [all_usable] slope_change D6: ok; stat 4.08 dof 2 p 0.13; ref frac — -> inconclusive
+   [all_usable] matched_wavelength_pairs D6: ok; stat 228 dof 3 p 3.33e-49; ref frac — -> conditional
+   [all_usable] colour_change ['D6', 'D3']: ok; stat 55.4 dof 2 p 9.24e-13; ref frac — -> inconclusive
+   [unflagged_only] grey_variability D3: insufficient_data; stat — dof — p —; ref frac — -> inconclusive
+   [unflagged_only] slope_change D3: insufficient_data; stat — dof — p —; ref frac — -> inconclusive
+   [unflagged_only] matched_wavelength_pairs D3: insufficient_data; stat — dof — p —; ref frac — -> inconclusive
+   [unflagged_only] grey_variability D6: insufficient_data; stat — dof — p —; ref frac — -> inconclusive
+   [unflagged_only] slope_change D6: insufficient_data; stat — dof — p —; ref frac — -> inconclusive
+   [unflagged_only] matched_wavelength_pairs D6: insufficient_data; stat — dof — p —; ref frac — -> inconclusive
+   [unflagged_only] colour_change None: insufficient_data; stat — dof — p —; ref frac — -> inconclusive
+
+== r_dra: 29 exposures, 7 failed at caching, 0 reference stars; target states {'saturated': 27, 'off_image': 2}
+   coverage D3 epoch 0: 0/6 usable, no usable data, {'off_image': 1, 'saturated': 5}
+   coverage D3 epoch 1: 0/4 usable, no usable data, {'saturated': 4}
+   coverage D3 epoch 2: 0/6 usable, no usable data, {'saturated': 6}
+   coverage D6 epoch 0: 0/5 usable, no usable data, {'off_image': 1, 'saturated': 4}
+   coverage D6 epoch 1: 0/4 usable, no usable data, {'saturated': 4}
+   coverage D6 epoch 2: 0/4 usable, no usable data, {'saturated': 4}
+   fit D3: none (not enough usable measurements)
+   fit D6: none (not enough usable measurements)
+   [all_usable] grey_variability D3: insufficient_data; stat — dof — p —; ref frac — -> inconclusive
+   [all_usable] slope_change D3: insufficient_data; stat — dof — p —; ref frac — -> inconclusive
+   [all_usable] matched_wavelength_pairs D3: insufficient_data; stat — dof — p —; ref frac — -> inconclusive
+   [all_usable] grey_variability D6: insufficient_data; stat — dof — p —; ref frac — -> inconclusive
+   [all_usable] slope_change D6: insufficient_data; stat — dof — p —; ref frac — -> inconclusive
+   [all_usable] matched_wavelength_pairs D6: insufficient_data; stat — dof — p —; ref frac — -> inconclusive
+   [all_usable] colour_change None: insufficient_data; stat — dof — p —; ref frac — -> inconclusive
+
+wrote D:\Swavlai\programebi\Claude\Nasa\python\MgeluriProeqti\docs\data\spectrotemporal_report.json

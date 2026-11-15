@@ -78,6 +78,7 @@ For typed coordinates the app asks CatWISE2020 whether a known fast mover passed
       </fieldset>
 
       <label class="check" title="Searches every fetched exposure for faint sources moving along a straight line, with time-shuffled control searches. Adds roughly 10-30 s per detector after the frames arrive."><input id="shiftstack-checkbox" type="checkbox"> Shift-and-stack search (slower)</label>
+      <label class="check" title="Measures every fetched exposure on its own pixels, at its own wavelength and time, for the target and the tracked sources: F(lambda, t). Adds a few seconds to a minute after the frames arrive."><input id="st-checkbox" type="checkbox"> Spectro-temporal analysis F(λ, t)</label>
       <label>Quality <span id="quality-value">Mid (balanced)</span>
         <input id="quality-slider" type="range" min="0" max="2" value="1" step="1">
       </label>
@@ -135,13 +136,13 @@ For typed coordinates the app asks CatWISE2020 whether a known fast mover passed
   <div class="window-body">
     <section>
       <h2>Light curve</h2>
-      <canvas id="lightcurve-canvas" width="288" height="120"></canvas>
+      <div class="plot-box"><canvas id="lightcurve-canvas" width="288" height="120"></canvas></div>
       <p class="status-text">Aperture flux at the target's predicted position per frame, mJy ±1σ, for the detector shown. Hollow markers: measurement refused (masked, saturated or off-image). Error bars are statistical only: frames of a constant star differ by about 3–5% (measured on field stars). Each frame also samples a different wavelength within the detector (see λ in the frame label), so differences can be spectral rather than variability.</p>
     </section>
 
     <section>
       <h2>Spectrum</h2>
-      <canvas id="spectrum-canvas" width="288" height="120"></canvas>
+      <div class="plot-box"><canvas id="spectrum-canvas" width="288" height="120"></canvas></div>
       <p id="spectrum-status" class="status-text"></p>
       <p class="status-text">Click in the image for aperture flux (mJy, ±1σ, r = 9″, no aperture correction) vs wavelength, across all 6 detectors. Clicking on the crosshair of a proper-motion target follows its motion per exposure. Points are coloured by date. SPHEREx does not see all wavelengths at once, so a variable star's points from different dates are not one spectrum. Slow: it re-queries IRSA. Compare with IRSA's <a href="https://irsa.ipac.caltech.edu/applications/spherex/tool-spectrophotometry" target="_blank" rel="noopener">official Spectrophotometry Tool</a>.</p>
     </section>
@@ -176,47 +177,106 @@ For typed coordinates the app asks CatWISE2020 whether a known fast mover passed
     <label>Speed <input id="speed-slider" type="range" min="1" max="10" value="4"></label>
     <label class="check"><input id="loop-checkbox" type="checkbox" checked> Loop</label>
     <label class="check"><input id="ab-checkbox" type="checkbox"> A/B flip</label>
-    <button type="button" id="sources-btn" class="text-btn" aria-pressed="false" aria-controls="sources-window" title="Open or close the tracked sources window">Sources</button>
+    <button type="button" id="sources-btn" class="text-btn" data-toggle-window="sources" aria-pressed="false" aria-controls="sources-window" title="Open or close the tracked sources window">Sources</button>
+    <button type="button" id="spectro-btn" class="text-btn" data-toggle-window="spectro" aria-pressed="false" aria-controls="st-window" title="Open or close the spectro-temporal analysis window">Spectra</button>
     <button type="button" id="fullscreen-btn" class="icon-btn" title="Full screen" aria-label="Full screen"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="square" aria-hidden="true"><path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4"/></svg></button>
     <button type="button" class="pin-btn" data-pin="bottom" aria-pressed="false" title="Keep this bar open" aria-label="Keep this bar open"></button>
   </div>
 </footer>
 
+<!-- Floating windows. Unlike the four edge windows these are opened on
+     request (buttons in the bottom bar), can be dragged by their title bar
+     and resized from any edge or corner, and remember where they were put
+     (ui_chrome.js). Their content is split into tabs so that each table or
+     plot gets the whole window. -->
+
 <!-- Tracked sources: detection, tracking, catalogue comparison and ranking
-     for the detector shown, plus volunteer classification. Opened with the
-     Sources button in the bottom bar; Esc or its square closes it. -->
-<section id="sources-window" class="window sources-window" aria-label="Tracked sources">
-  <div class="titlebar">
+     for the detector shown, plus volunteer classification. -->
+<section id="sources-window" class="window float-window" data-window="sources" aria-label="Tracked sources">
+  <div class="titlebar" data-drag>
     <h2 class="title">Tracked sources</h2>
-    <button type="button" id="sources-close" class="pin-btn close-btn" title="Close this window (Esc)" aria-label="Close this window"></button>
+    <button type="button" class="pin-btn close-btn" data-close title="Close this window (Esc)" aria-label="Close this window"></button>
   </div>
   <div class="window-body">
-    <p class="status-text">Automatic detection, tracking and catalogue comparison for the detector shown. Made for human inspection, not discovery claims.</p>
-    <div class="analysis-toolbar">
-      <label class="check"><input id="show-tracks-checkbox" type="checkbox" checked> Mark tracked sources on the image</label>
+    <div class="tab-row">
+      <button type="button" class="tab-btn" data-tab="sources-tab-table" aria-selected="true">Ranked sources</button>
+      <button type="button" class="tab-btn" data-tab="sources-tab-shiftstack" aria-selected="false">Shift-and-stack</button>
+      <span class="tab-gap"></span>
+      <label class="check"><input id="show-tracks-checkbox" type="checkbox" checked> Mark on the image</label>
       <button type="button" id="export-json-btn" class="text-btn" disabled>Export JSON</button>
       <button type="button" id="export-csv-btn" class="text-btn" disabled>Export CSV</button>
     </div>
-    <p id="analysis-status" class="status-text"></p>
-    <div class="sources-columns">
-      <div class="analysis-table-scroll">
-        <table class="analysis-table">
-          <thead>
-            <tr>
-              <th>#</th><th title="catalogued = uniquely matched to Gaia/CatWISE; candidate = worth a look; uncertain = measurement not trustworthy">Status</th>
-              <th title="0-1, weighted motion + variability + missing catalogue counterpart. Not a probability.">Anomaly</th>
-              <th title="How far the measurement itself can be trusted">Reliability</th>
-              <th title="Median detection signal-to-noise">S/N</th><th>Epochs</th><th>Proper motion</th>
-              <th title="Probability of the measured scatter if the flux were constant (6% systematic error included)">Variability</th>
-              <th>Catalogues</th><th>RA, Dec (deg)</th>
-            </tr>
-          </thead>
-          <tbody id="analysis-table-body"></tbody>
-        </table>
+    <div class="tab-pane" id="sources-tab-table">
+      <p id="analysis-status" class="status-text"></p>
+      <div class="sources-columns">
+        <div class="analysis-table-scroll">
+          <table class="analysis-table">
+            <thead>
+              <tr>
+                <th>#</th><th title="catalogued = uniquely matched to Gaia/CatWISE; candidate = worth a look; uncertain = measurement not trustworthy">Status</th>
+                <th title="0-1, weighted motion + variability + missing catalogue counterpart. Not a probability.">Anomaly</th>
+                <th title="How far the measurement itself can be trusted">Reliability</th>
+                <th title="Median detection signal-to-noise">S/N</th><th>Epochs</th><th>Proper motion</th>
+                <th title="Probability of the measured scatter if the flux were constant (6% systematic error included)">Variability</th>
+                <th>Catalogues</th><th>RA, Dec (deg)</th>
+              </tr>
+            </thead>
+            <tbody id="analysis-table-body"></tbody>
+          </table>
+        </div>
+        <div id="analysis-detail" class="analysis-detail"></div>
       </div>
-      <div id="analysis-detail" class="analysis-detail"></div>
     </div>
-    <div id="shiftstack-panel" class="shiftstack-panel"></div>
+    <div class="tab-pane" id="sources-tab-shiftstack" hidden>
+      <div id="shiftstack-panel" class="shiftstack-panel"></div>
+    </div>
+  </div>
+</section>
+
+<!-- Spectro-temporal analysis F(lambda, t): measured flux per exposure, each
+     at its own wavelength and time (Phase Three, app/spectrotemporal.py). -->
+<section id="st-window" class="window float-window" data-window="spectro" aria-label="Spectro-temporal analysis">
+  <div class="titlebar" data-drag>
+    <h2 class="title">Spectro-temporal analysis F(λ, t)</h2>
+    <button type="button" class="pin-btn close-btn" data-close title="Close this window (Esc)" aria-label="Close this window"></button>
+  </div>
+  <div class="window-body" id="st-panel">
+    <p id="st-status" class="status-text"></p>
+    <div id="st-body" hidden>
+      <div class="tab-row">
+        <label class="inline">Source <select id="st-source-select"></select></label>
+        <span class="tab-gap"></span>
+        <button type="button" class="tab-btn" data-tab="st-tab-sed" aria-selected="true">Spectrum by epoch</button>
+        <button type="button" class="tab-btn" data-tab="st-tab-lc" aria-selected="false">Light curves</button>
+        <button type="button" class="tab-btn" data-tab="st-tab-metrics" aria-selected="false">Change statistics</button>
+        <button type="button" class="tab-btn" data-tab="st-tab-coverage" aria-selected="false">Coverage</button>
+        <button type="button" class="tab-btn" data-tab="st-tab-table" aria-selected="false">All measurements</button>
+      </div>
+      <div class="tab-pane" id="st-tab-sed">
+        <div id="st-epoch-boxes" class="st-epoch-boxes"></div>
+        <div class="plot-box plot-fill"><canvas id="st-sed-canvas" width="900" height="260"></canvas></div>
+        <p id="st-hover" class="status-text">Hover a point to see its measurement.</p>
+        <p class="status-text">F<sub>ν</sub> in mJy (r = 9″ aperture, not aperture-corrected). One panel per detector: the gap between detectors is not observed. Filled = valid; hollow = valid but a saturation-related flag is in the aperture; arrow = 3σ upper limit; × on the baseline = no flux (red: saturated). Coloured bars under each panel: wavelengths actually sampled per epoch. Points of one epoch were taken over several days; only dichroic pairs (D1/D4, D2/D5, D3/D6) are simultaneous. No line is drawn between points.</p>
+      </div>
+      <div class="tab-pane" id="st-tab-lc" hidden>
+        <div class="plot-box plot-fill"><canvas id="st-lc-canvas" width="900" height="240"></canvas></div>
+      </div>
+      <div class="tab-pane" id="st-tab-metrics" hidden>
+        <p class="status-text">Each statistic is a test against "no change" with the stated errors (statistical + a 2.5 % per-exposure systematic floor measured on field stars), compared with stationary field stars in the same field when there are enough. A p-value is not the probability that the source is variable; "significant" describes the measurement, not its physical cause.</p>
+        <div id="st-metrics"></div>
+      </div>
+      <div class="tab-pane" id="st-tab-coverage" hidden>
+        <div id="st-coverage" class="analysis-table-scroll"></div>
+      </div>
+      <div class="tab-pane" id="st-tab-table" hidden>
+        <div class="analysis-table-scroll">
+          <table class="analysis-table">
+            <thead><tr><th>Date</th><th>MJD (mid)</th><th>Epoch</th><th>obs_id</th><th>Det</th><th>λ (µm)</th><th>Bandwidth (µm)</th><th>F (mJy)</th><th>σ (mJy)</th><th>S/N</th><th>3σ limit (mJy)</th><th>State</th><th>Flags in aperture</th></tr></thead>
+            <tbody id="st-table-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
   </div>
 </section>
 

@@ -187,7 +187,7 @@ a:hover { color: var(--ink-bright); }
 .dock-bottom {
   bottom: 16px;
   left: 50%;
-  width: min(1040px, calc(100vw - 32px));
+  width: min(1140px, calc(100vw - 32px));
   transform: translateX(-50%);
   z-index: 12;
 }
@@ -202,6 +202,7 @@ a:hover { color: var(--ink-bright); }
 }
 .dock-left { left: 16px; }
 .dock-right { right: 16px; }
+.dock-left, .dock-right { max-width: calc(100vw - 32px); }
 
 body.show-top .dock-top,
 body.show-bottom .dock-bottom,
@@ -695,36 +696,68 @@ body.show-all #progress-wrap {
 .playback-bar select:hover { border-color: var(--frame-hi); }
 .playback-bar select option { background: var(--win-solid); color: var(--ink); }
 .playback-bar .text-btn { padding: 4px 12px 5px; font-size: 15px; }
-#sources-btn[aria-pressed="true"] { color: var(--ink-bright); border-color: var(--ink-bright); }
+.playback-bar .text-btn[aria-pressed="true"] { color: var(--ink-bright); border-color: var(--ink-bright); }
 
-/* ------------------------------------------------- tracked sources window */
-/* A fifth window, opened on request (Sources button) rather than by an
-   edge: a wide table needs the middle of the screen. It sits above the
-   bottom bar, which stays up with it - stepping frames and switching
-   detector is how the table is read. */
-.sources-window {
+/* ------------------------------------------------------- floating windows */
+/* Tracked sources and Spectro-temporal analysis: opened on request (buttons
+   in the bottom bar) rather than by an edge - a wide table or a plot needs
+   the middle of the screen. Each has a default place and size here; once
+   the user moves or resizes one, ui_chrome.js sets left/top/width/height
+   in pixels and adds .placed. */
+.float-window {
   position: fixed;
-  left: 50%;
-  bottom: calc(var(--bottom-dock-h, 150px) + 34px);
   z-index: 13;
+  /* Nearly opaque, unlike the edge windows: these hold dense tables and
+     plots, and two of them can overlap. */
+  background: rgba(5, 4, 3, 0.96);
   display: flex;
   flex-direction: column;
-  width: min(1180px, calc(100vw - 32px));
-  max-height: min(58vh, calc(100vh - var(--bottom-dock-h, 150px) - 70px));
-  transform: translateX(-50%);
+  min-width: 380px;
+  min-height: 220px;
   opacity: 0;
   visibility: hidden;
   pointer-events: none;
   transition: opacity 0.14s linear, visibility 0s linear 0.14s;
 }
-body.show-sources .sources-window {
+#sources-window {
+  left: 50%;
+  bottom: calc(var(--bottom-dock-h, 150px) + 34px);
+  width: min(1180px, calc(100vw - 32px));
+  height: min(46vh, calc(100vh - var(--bottom-dock-h, 150px) - 70px));
+  transform: translateX(-50%);
+}
+#st-window {
+  left: 50%;
+  top: 56px;
+  width: min(1120px, calc(100vw - 32px));
+  height: min(66vh, calc(100vh - 240px));
+  transform: translateX(-50%);
+}
+/* (ids, to outrank the default placement just above) */
+#sources-window.placed,
+#st-window.placed { right: auto; bottom: auto; transform: none; }
+body.show-sources #sources-window,
+body.show-spectro #st-window {
   opacity: 1;
   visibility: visible;
   pointer-events: auto;
   transition: opacity 0.14s linear;
 }
+/* The bottom bar stays up with the sources table: stepping frames and
+   switching detector is how that table is read. */
 body.show-sources .dock-bottom { opacity: 1; pointer-events: auto; }
-body.show-sources #edge-hint { display: none; }
+body.show-sources #edge-hint,
+body.show-spectro #edge-hint { display: none; }
+
+.float-window .titlebar { cursor: move; touch-action: none; user-select: none; }
+.float-window > .window-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow: hidden;
+}
+.float-window > .window-body > p { margin: 0; }
 
 /* The closing square carries a diagonal cross instead of a pin's fill. */
 .close-btn {
@@ -735,25 +768,79 @@ body.show-sources #edge-hint { display: none; }
 }
 .close-btn:hover { border-color: var(--ink-bright); }
 
-.analysis-toolbar {
+/* Resize: an invisible strip along each edge and a square on each corner
+   (the frame's corner studs are where the eye looks for them). Also used
+   on the inner edge of the two side windows. */
+.resize-handle { position: absolute; z-index: 3; touch-action: none; }
+.rh-n, .rh-s { left: 10px; right: 10px; height: 10px; cursor: ns-resize; }
+.rh-e, .rh-w { top: 10px; bottom: 10px; width: 10px; cursor: ew-resize; }
+.rh-n { top: -6px; }
+.rh-s { bottom: -6px; }
+.rh-e { right: -6px; }
+.rh-w { left: -6px; }
+.rh-ne, .rh-nw, .rh-se, .rh-sw { width: 16px; height: 16px; }
+.rh-ne { top: -7px; right: -7px; cursor: nesw-resize; }
+.rh-sw { bottom: -7px; left: -7px; cursor: nesw-resize; }
+.rh-nw { top: -7px; left: -7px; cursor: nwse-resize; }
+.rh-se { bottom: -7px; right: -7px; cursor: nwse-resize; }
+
+/* Tabs: a row of plain words, the chosen one bright and underlined - the
+   way a game inventory switches between its lists. Controls that belong
+   to the whole window share the row. */
+.tab-row {
+  flex: none;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px 14px;
-  margin-bottom: 8px;
+  gap: 4px 6px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--frame-lo);
 }
-.analysis-toolbar label { margin: 0 auto 0 0; }
-.analysis-toolbar .text-btn { padding: 3px 12px 4px; font-size: 14.5px; }
+.tab-btn {
+  padding: 2px 10px 3px;
+  background: none;
+  color: var(--ink-dim);
+  border: 1px solid transparent;
+  border-radius: 0;
+  font: inherit;
+  font-size: 15.5px;
+}
+.tab-btn:hover { color: var(--ink-bright); }
+.tab-btn[aria-selected="true"] {
+  color: var(--ink-bright);
+  border-color: var(--frame);
+  background: var(--inset);
+  box-shadow: inset 0 -2px 0 var(--frame-hi);
+}
+.tab-gap { flex: 1; }
+.tab-row label { margin: 0; font-size: 15px; white-space: nowrap; }
+.tab-row label.inline { display: flex; align-items: center; gap: 8px; }
+.tab-row select { display: inline-block; width: auto; max-width: 300px; margin: 0; }
+.tab-row .text-btn { padding: 3px 12px 4px; font-size: 14.5px; }
+.tab-pane {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--frame) #000;
+}
+.tab-pane > p { margin: 0; flex: none; }
 
+/* Tracked sources: table on the left, the selected source on the right;
+   both take whatever height the window has. */
 .sources-columns {
+  flex: 1;
+  min-height: 0;
   display: grid;
   grid-template-columns: minmax(0, 1.55fr) minmax(280px, 1fr);
   gap: 14px;
-  align-items: start;
 }
 .analysis-table-scroll,
 .analysis-detail {
-  max-height: 270px;
+  min-height: 0;
   overflow: auto;
   scrollbar-width: thin;
   scrollbar-color: var(--frame) #000;
@@ -763,6 +850,7 @@ body.show-sources #edge-hint { display: none; }
   border: 1px solid var(--frame-lo);
   box-shadow: inset 0 0 0 1px #000;
 }
+.tab-pane > .analysis-table-scroll { flex: 1; }
 .analysis-table {
   width: 100%;
   border-collapse: collapse;
@@ -813,9 +901,6 @@ body.show-sources #edge-hint { display: none; }
 }
 
 .shiftstack-panel {
-  margin-top: 12px;
-  padding-top: 10px;
-  border-top: 1px solid var(--frame-lo);
   font-size: 14.5px;
   line-height: 1.4;
 }
@@ -849,10 +934,65 @@ body.show-sources #edge-hint { display: none; }
 }
 .uncertainty-box ul { margin: 4px 0 0 16px; }
 
+
+/* ------------------------------------------------- spectro-temporal window */
+#st-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+/* A plot fills its box; app.js redraws it at the box's size, so resizing
+   the window gives a larger plot, not a stretched picture. */
+.plot-box { position: relative; width: 100%; }
+.plot-box canvas { display: block; }
+.plot-box.plot-fill {
+  flex: 1;
+  min-height: 200px;
+  background: var(--inset);
+  border: 1px solid var(--frame-lo);
+  box-shadow: inset 0 0 0 1px #000;
+}
+.plot-box.plot-fill canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.st-epoch-boxes {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 18px;
+  font-size: 14.5px;
+}
+.st-epoch-boxes label { margin: 0; white-space: nowrap; }
+#st-hover { min-height: 2.8em; color: var(--ink); }
+.st-metric {
+  margin: 0 0 10px;
+  padding: 4px 10px 5px;
+  border-left: 2px solid var(--frame);
+  background: var(--inset);
+  font-size: 14.5px;
+  line-height: 1.4;
+}
+.st-metric p { margin: 2px 0; }
+
+/* Small screens: the floating windows take the space between the two bars
+   and are not moved or resized. */
 @media (max-width: 900px) {
-  .sources-columns { grid-template-columns: minmax(0, 1fr); }
-  .sources-window { max-height: calc(100vh - var(--bottom-dock-h, 150px) - var(--top-dock-h, 96px) - 70px); }
+  .sources-columns { grid-template-columns: minmax(0, 1fr); grid-auto-rows: minmax(140px, 1fr); }
+}
+@media (max-width: 720px) {
+  .float-window,
+  .float-window.placed {
+    left: 8px !important;
+    right: 8px !important;
+    top: calc(var(--top-dock-h, 96px) + 24px) !important;
+    bottom: calc(var(--bottom-dock-h, 150px) + 24px) !important;
+    width: auto !important;
+    height: auto !important;
+    min-width: 0;
+    transform: none;
+  }
+  .float-window .resize-handle { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .sources-window, body.show-sources .sources-window { transition: none; }
+  .float-window, body.show-sources #sources-window, body.show-spectro #st-window { transition: none; }
 }

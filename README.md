@@ -23,6 +23,11 @@
 > on cached real cutouts of the five targets. Sections below that describe
 > nearest-neighbour resampling, a stateless backend, or "What doesn't (yet)"
 > are the pre-Phase-Two record.
+>
+> **Phase Three:** spectro-temporal analysis F(λ, t), meaning per-exposure flux at each
+> exposure's own wavelength and time, with spectra by epoch, light curves per detector and
+> separate change statistics. See [docs/PHASE3.md](docs/PHASE3.md). In the app, tick
+> "Spectro-temporal analysis"; in the API, add `spectrotemporal=true` to `/api/frames`.
 
 A public web tool to blink NASA SPHEREx epochs at any sky position, so moving
 or variable objects pop out visually — the same idea volunteers used on
@@ -94,9 +99,10 @@ docker-compose.yml). Several replicas would need a shared database.
 ### The fullscreen interface
 On this branch the image fills the whole window and the controls are
 framed windows that stay hidden until you need them. It runs on the Phase
-Two discovery pipeline (`phase2-discovery-pipeline`): same backend, same
-analysis, a different page. (The original layout, with the controls in a
-sidebar, is on the `main` and `phase2-discovery-pipeline` branches.)
+Three code (`phase3-spectro-temporal`): same backend, same analysis, a
+different page. (The original layout, with the controls in a sidebar, is on
+the `main`, `phase2-discovery-pipeline` and `phase3-spectro-temporal`
+branches.)
 
 - Move the cursor to an edge of the window to open the window that lives
   there: search (top), display controls (left), light curve / spectrum /
@@ -114,7 +120,16 @@ sidebar, is on the `main` and `phase2-discovery-pipeline` branches.)
   volunteer classification, export, and the shift-and-stack report. The
   selected source and the other tracked sources are ringed on the image;
   the red cross follows the target's predicted position frame by frame.
-  Esc or the window's square closes it.
+- **Spectra** in the bottom bar opens the *Spectro-temporal analysis*
+  window (tick "Spectro-temporal analysis F(λ, t)" in the left window
+  before searching): spectrum by epoch, light curves per detector, change
+  statistics, wavelength coverage and the table of every measurement, each
+  on its own tab.
+- Those two windows float: drag the title bar to move one, drag any edge
+  or corner to resize it (tables and plots grow with it), double-click the
+  title bar to put it back, Esc or its square to close it. The two side
+  windows can be made wider from their inner edge. Sizes and positions are
+  remembered in the browser.
 - While images download, the bar at the top counts them, for example
   `9 / 15 images downloaded (60%), 1 / 3 frame(s) ready`; after the last
   one it says the source analysis is running.
