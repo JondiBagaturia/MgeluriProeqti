@@ -22,7 +22,11 @@ from .stream import stream_frames
 from .spectrum import compute_spectrum
 from .cache import TTLDedupeCache
 from .config import get_config
-
+from .jsonsafe import clean
+from . import store
+from pydantic import BaseModel
+from dataclasses import asdict
+from functools import lru_cache
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
@@ -34,7 +38,7 @@ app = FastAPI(title="SPHEREx Blink API", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_methods=["GET"],
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
@@ -49,9 +53,16 @@ def _parse_detectors(detectors: Optional[str]) -> Optional[list[str]]:
     return [d.strip().upper() for d in detectors.split(",") if d.strip()]
 
 
-def _resolve_or_400(position: str) -> ResolvedPosition:
+@lru_cache(maxsize=512)
+def _parse_cached(position: str, pm_lookup: bool) -> ResolvedPosition:
+    # Name resolution hits SIMBAD (seconds); every endpoint re-resolves the
+    # same string, so memoise successful lookups for the process lifetime.
+    return parse_position(position, pm_lookup=pm_lookup)
+
+
+def _resolve_or_400(position: str, pm_lookup: bool = True) -> ResolvedPosition:
     try:
-        return parse_position(position)
+        return _parse_cached(position.strip(), pm_lookup)
     except CoordParseError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -83,16 +94,21 @@ async def releases():
 
 
 @app.get("/api/resolve")
-async def resolve(position: str = Query(..., description="RA/Dec (sexagesimal or decimal) or object name")):
+async def resolve(
+    position: str = Query(..., description="RA/Dec (sexagesimal or decimal) or object name"),
+    pm_lookup: bool = Query(True, description="For typed coordinates: look for a CatWISE2020 fast mover whose track passes through them"),
+):
     """Fast, cutout-free: resolve a query to RA/Dec (+ proper motion if a
     named object has one). The frontend calls this as the user types/submits,
     before deciding on FOV/detectors."""
-    resolved = await run_in_threadpool(_resolve_or_400, position)
+    resolved = await run_in_threadpool(_resolve_or_400, position, pm_lookup)
     return {
         "ra_deg": resolved.coord.ra.deg,
         "dec_deg": resolved.coord.dec.deg,
         "source": resolved.source,
         "name": resolved.name,
+        "note": resolved.note,
+        "ref_epoch_mjd": float(resolved.ref_epoch.mjd),
         "has_proper_motion": resolved.has_proper_motion,
         "pmra_mas_yr": resolved.pmra,
         "pmdec_mas_yr": resolved.pmdec,
@@ -103,12 +119,13 @@ async def resolve(position: str = Query(..., description="RA/Dec (sexagesimal or
 @app.get("/api/images")
 async def images(
     position: str = Query(...),
+    pm_lookup: bool = Query(True, description="For typed coordinates: look for a CatWISE2020 fast mover whose track passes through them"),
     fov: Optional[float] = Query(None, description="arcmin"),
     detectors: Optional[str] = Query(None, description="Comma-separated, e.g. D6,D2"),
 ):
     """Metadata-only list of matching images (no pixels fetched) — this is
     the fast call the UI uses to show "N images found" before streaming."""
-    resolved = await run_in_threadpool(_resolve_or_400, position)
+    resolved = await run_in_threadpool(_resolve_or_400, position, pm_lookup)
     fov_arcmin = _validate_fov(fov)
     det_list = _parse_detectors(detectors)
 
@@ -131,10 +148,15 @@ async def images(
 @app.get("/api/frames")
 async def frames(
     position: str = Query(...),
+    pm_lookup: bool = Query(True, description="For typed coordinates: look for a CatWISE2020 fast mover whose track passes through them"),
     fov: Optional[float] = Query(None, description="arcmin"),
     detectors: Optional[str] = Query(None, description="Comma-separated, e.g. D6,D2"),
-    group: str = Query("epoch", pattern="^(epoch|detector_epoch|single)$"),
+    # Default is per-detector: stacking different detectors mixes very
+    # different wavelengths into one frame (docs/AUDIT.md C1). "epoch"
+    # (cross-detector stack) remains available as a display aid only.
+    group: str = Query("detector_epoch", pattern="^(epoch|detector_epoch|single)$"),
     quality: Optional[str] = Query(None, pattern="^(low|mid|high)$", description="Max exposures/group: low=fast, high=full quality"),
+    shiftstack: bool = Query(False, description="Also run the trial-motion shift-and-stack search on the fetched exposures (slower: ~20 control searches per detector)"),
 ):
     """NDJSON stream: one processed, combined frame per line, as soon as
     each is ready. Each line carries width/height/scale/offset + a base64
@@ -144,7 +166,7 @@ async def frames(
     (see app/pipeline.py's cap_group_indices) - applied before fetching,
     since that's ~97% of request time, not after."""
     t0 = time.time()
-    resolved = await run_in_threadpool(_resolve_or_400, position)
+    resolved = await run_in_threadpool(_resolve_or_400, position, pm_lookup)
     resolve_seconds = time.time() - t0
     fov_arcmin = _validate_fov(fov)
     det_list = _parse_detectors(detectors)
@@ -152,7 +174,12 @@ async def frames(
 
     def generate():
         try:
-            for encoded in stream_frames(resolved, fov_arcmin, det_list, group, resolve_seconds, max_exposures):
+            for encoded in stream_frames(resolved, fov_arcmin, det_list, group, resolve_seconds, max_exposures,
+                                         shiftstack=shiftstack):
+                if isinstance(encoded, dict):  # the end-of-stream analysis record
+                    _store_candidates(encoded, position)
+                    yield (json.dumps(clean(encoded), allow_nan=False) + "\n").encode("utf-8")
+                    continue
                 line = {
                     "width": encoded.width,
                     "height": encoded.height,
@@ -161,20 +188,77 @@ async def frames(
                     "payload_b64": encoded.payload_b64,
                     **encoded.metadata,
                 }
-                yield (json.dumps(line) + "\n").encode("utf-8")
+                yield (json.dumps(clean(line), allow_nan=False) + "\n").encode("utf-8")
         except DiscoveryError as exc:
             yield (json.dumps({"error": str(exc)}) + "\n").encode("utf-8")
+        except Exception as exc:  # noqa: BLE001 - a mid-stream crash must reach the user, not just cut the stream
+            log.exception("frame stream failed")
+            yield (json.dumps({"error": f"Processing failed: {type(exc).__name__}: {exc}"}) + "\n").encode("utf-8")
 
     return StreamingResponse(
         generate(),
         media_type="application/x-ndjson",
-        headers={"Cache-Control": "public, max-age=300"},
+        # no-store: the stream can carry a transient failure (a catalogue 502, a
+        # partial epoch). The browser keeps good results in IndexedDB itself.
+        headers={"Cache-Control": "no-store"},
     )
+
+
+MAX_STORED_PER_SERIES = 25
+
+
+def _store_candidates(analysis: dict, field_query: str) -> None:
+    """Give the top-ranked tracks of each series a persistent id so
+    volunteers can classify them. A database problem is reported in the
+    analysis record, never raised."""
+    try:
+        for series in analysis.get("series", []):
+            for track in series.get("tracks", [])[:MAX_STORED_PER_SERIES]:
+                track["candidate_id"] = store.upsert_candidate(track, field_query)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("could not store candidates")
+        analysis["store_error"] = f"{type(exc).__name__}: {exc}"
+
+
+class ClassificationIn(BaseModel):
+    label: str
+    voter: str
+
+
+@app.get("/api/candidates")
+def candidates(
+    limit: int = Query(50, ge=1, le=200),
+    min_score: float = Query(0.0, ge=0.0, le=1.0),
+    label: Optional[str] = Query(None, pattern="^(candidate|catalogued|uncertain|unverified)$"),
+):
+    """Stored tracked sources, highest anomaly score first, with volunteer agreement."""
+    return JSONResponse(clean({"labels": store.LABEL_TEXT, "candidates": store.list_candidates(limit, min_score, label)}))
+
+
+@app.get("/api/candidates/{candidate_id}")
+def candidate(candidate_id: str, voter: Optional[str] = Query(None)):
+    found = store.get_candidate(candidate_id, voter)
+    if found is None:
+        raise HTTPException(status_code=404, detail="Unknown candidate")
+    return JSONResponse(clean(found))
+
+
+@app.post("/api/candidates/{candidate_id}/classifications")
+def classify(candidate_id: str, body: ClassificationIn):
+    """Record one volunteer's label. One vote per voter token; voting again replaces it."""
+    try:
+        agreement = store.classify(candidate_id, body.voter, body.label)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown candidate") from None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(clean({"your_label": body.label, "classifications": agreement}))
 
 
 @app.get("/api/spectrum")
 async def spectrum(
     position: str = Query(..., description="RA/Dec or object name - the exact clicked pixel, not necessarily the search target"),
+    pm_lookup: bool = Query(True, description="For typed coordinates: look for a CatWISE2020 fast mover whose track passes through them"),
     fov: Optional[float] = Query(None, description="arcmin"),
     detectors: Optional[str] = Query(None, description="Comma-separated; omit for all 6 (the point of a spectrum)"),
 ):
@@ -182,7 +266,7 @@ async def spectrum(
     matching cutout, native-pixel and native-wavelength per exposure (see
     app/spectrum.py) - not reprojected, so proper motion is applied at each
     exposure's own epoch rather than a shared mean epoch like /api/frames."""
-    resolved = await run_in_threadpool(_resolve_or_400, position)
+    resolved = await run_in_threadpool(_resolve_or_400, position, pm_lookup)
     fov_arcmin = _validate_fov(fov)
     det_list = _parse_detectors(detectors)
     try:
@@ -190,17 +274,22 @@ async def spectrum(
     except DiscoveryError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return JSONResponse(
-        [
+        clean(
             {
-                "time_mjd": p.time_mjd,
-                "detector": p.detector,
-                "wavelength_um": p.wavelength_um,
-                "bandwidth_um": p.bandwidth_um,
-                "flux": p.flux,
-                "masked": p.masked,
+                "measured_at": {
+                    "source": resolved.source,
+                    "name": resolved.name,
+                    "proper_motion_applied_per_exposure": resolved.has_proper_motion,
+                },
+                "units": {"flux": "mJy (aperture flux, no aperture correction)", "wavelength": "um"},
+                "caveat": (
+                    "Points come from different observation times. SPHEREx does not observe all "
+                    "wavelengths simultaneously, so for a variable source compare points only "
+                    "within one epoch."
+                ),
+                "points": [asdict(p) for p in points],
             }
-            for p in points
-        ],
+        ),
         headers={"Cache-Control": "public, max-age=300"},
     )
 

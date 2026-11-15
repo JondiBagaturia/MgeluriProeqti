@@ -72,7 +72,13 @@ class Config:
     fov: FovConfig = None
     fetch: FetchConfig = None
     quality: QualityConfig = None
-    pixel_scale_arcsec: float = 6.15
+    pixel_scale_arcsec: float = 6.15          # common display/analysis grid
+    native_pixel_scale_arcsec: float = 6.15   # SPHEREx detector pixel (SIA s_pixel_scale)
+    spectrum_max_exposures: int = 60
+    resample_kernel: str = "lanczos3"
+    # (true variance of an r=9" aperture sum) / (sum of per-pixel variances),
+    # measured per kernel by scripts/benchmark_resampling.py.
+    aperture_variance_inflation: float = 5.0
 
 
 @lru_cache(maxsize=1)
@@ -113,4 +119,12 @@ def get_config() -> Config:
         fetch=fetch,
         quality=quality,
         pixel_scale_arcsec=raw["pixel_scale_arcsec"],
+        native_pixel_scale_arcsec=raw.get("native_pixel_scale_arcsec", 6.15),
+        spectrum_max_exposures=raw.get("spectrum", {}).get("max_exposures", 60),
+        resample_kernel=raw.get("resampling", {}).get("kernel", "lanczos3"),
+        aperture_variance_inflation=float(
+            raw.get("resampling", {}).get("aperture_variance_inflation", {}).get(
+                raw.get("resampling", {}).get("kernel", "lanczos3"), 5.0
+            )
+        ),
     )

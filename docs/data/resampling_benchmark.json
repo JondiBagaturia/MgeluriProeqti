@@ -1,0 +1,150 @@
+[
+ {
+  "settings": {
+   "trials": 150,
+   "exposures_per_epoch": 1,
+   "native_arcsec": 6.15,
+   "grid_arcsec": 3.075,
+   "psf_fwhm_arcsec": 9.0,
+   "aperture_arcsec": 9.0,
+   "ideal_aperture_fraction_unpixelised": 0.937497049790386
+  },
+  "methods": {
+   "nearest": {
+    "centroid_rms_arcsec_moment": 0.49115509175332206,
+    "centroid_rms_arcsec_gaussfit": 0.5791700455988793,
+    "aperture_fraction_mean": 0.8586245599027474,
+    "aperture_fraction_scatter_percent": 4.495200801344239,
+    "difference_peak_residual_fraction_median": 0.6837158968693484,
+    "difference_peak_residual_fraction_p95": 0.8580838795170795,
+    "pixel_noise_variance_vs_input": 1.002181591332341,
+    "aperture_variance_inflation": 3.673709763995169,
+    "seconds_per_exposure": 0.0021504000014829217
+   },
+   "bilinear": {
+    "centroid_rms_arcsec_moment": 0.07221184979209525,
+    "centroid_rms_arcsec_gaussfit": 0.09571860188483497,
+    "aperture_fraction_mean": 0.812770305299759,
+    "aperture_fraction_scatter_percent": 2.135484080880579,
+    "difference_peak_residual_fraction_median": 0.20842026731918453,
+    "difference_peak_residual_fraction_p95": 0.30995997059564573,
+    "pixel_noise_variance_vs_input": 0.4453925388041227,
+    "aperture_variance_inflation": 7.118348333572732,
+    "seconds_per_exposure": 0.0023950000013428507
+   },
+   "lanczos3": {
+    "centroid_rms_arcsec_moment": 0.08865204553375389,
+    "centroid_rms_arcsec_gaussfit": 0.12004354884063011,
+    "aperture_fraction_mean": 0.9174682829062145,
+    "aperture_fraction_scatter_percent": 1.5776964569012795,
+    "difference_peak_residual_fraction_median": 0.09686041837294287,
+    "difference_peak_residual_fraction_p95": 0.13782730238034505,
+    "pixel_noise_variance_vs_input": 0.8031564952297768,
+    "aperture_variance_inflation": 4.816222263504372,
+    "seconds_per_exposure": 0.009805449999475968
+   },
+   "adaptive": {
+    "centroid_rms_arcsec_moment": 0.0933368955566348,
+    "centroid_rms_arcsec_gaussfit": 0.12175878951594275,
+    "aperture_fraction_mean": 0.8301960702197273,
+    "aperture_fraction_scatter_percent": 2.0159741782155693,
+    "difference_peak_residual_fraction_median": 0.28335424076453564,
+    "difference_peak_residual_fraction_p95": 0.41483124880915195,
+    "pixel_noise_variance_vs_input": 0.5508888909500517,
+    "aperture_variance_inflation": 6.011970642262178,
+    "seconds_per_exposure": 0.008419750000030035
+   },
+   "exact": {
+    "centroid_rms_arcsec_moment": 0.09809366176836157,
+    "centroid_rms_arcsec_gaussfit": 0.13569777685365594,
+    "aperture_fraction_mean": 0.8443324720700172,
+    "aperture_fraction_scatter_percent": 2.0101061405215446,
+    "difference_peak_residual_fraction_median": 0.3807743663277167,
+    "difference_peak_residual_fraction_p95": 0.5369840512350929,
+    "pixel_noise_variance_vs_input": 0.698023368716831,
+    "aperture_variance_inflation": 4.9787955286135555,
+    "seconds_per_exposure": 0.014271400001234724
+   },
+   "native": {
+    "centroid_rms_arcsec_moment": 0.14032508888898473,
+    "centroid_rms_arcsec_gaussfit": 0.011188639024923357,
+    "aperture_fraction_mean": 0.9016540677939158,
+    "aperture_fraction_scatter_percent": 3.034426668234086
+   }
+  }
+ },
+ {
+  "settings": {
+   "trials": 150,
+   "exposures_per_epoch": 5,
+   "native_arcsec": 6.15,
+   "grid_arcsec": 3.075,
+   "psf_fwhm_arcsec": 9.0,
+   "aperture_arcsec": 9.0,
+   "ideal_aperture_fraction_unpixelised": 0.937497049790386
+  },
+  "methods": {
+   "nearest": {
+    "centroid_rms_arcsec_moment": 0.2057370776540986,
+    "centroid_rms_arcsec_gaussfit": 0.23448798095145398,
+    "aperture_fraction_mean": 0.8556495049300192,
+    "aperture_fraction_scatter_percent": 2.528702012312698,
+    "difference_peak_residual_fraction_median": 0.2947875666984744,
+    "difference_peak_residual_fraction_p95": 0.44070694235045205,
+    "pixel_noise_variance_vs_input": 0.20085927162639006,
+    "aperture_variance_inflation": 3.8214104201659085,
+    "seconds_per_exposure": 0.0020051700001204155
+   },
+   "bilinear": {
+    "centroid_rms_arcsec_moment": 0.04840907875605047,
+    "centroid_rms_arcsec_gaussfit": 0.040865958299619864,
+    "aperture_fraction_mean": 0.8140078389002483,
+    "aperture_fraction_scatter_percent": 1.9644521979597465,
+    "difference_peak_residual_fraction_median": 0.09053520451964672,
+    "difference_peak_residual_fraction_p95": 0.15020879001734785,
+    "pixel_noise_variance_vs_input": 0.09041404640317692,
+    "aperture_variance_inflation": 7.250777156091421,
+    "seconds_per_exposure": 0.002420859999983804
+   },
+   "lanczos3": {
+    "centroid_rms_arcsec_moment": 0.05560874303741704,
+    "centroid_rms_arcsec_gaussfit": 0.05164181225050255,
+    "aperture_fraction_mean": 0.9186868460241954,
+    "aperture_fraction_scatter_percent": 1.441550650690837,
+    "difference_peak_residual_fraction_median": 0.03973278221377474,
+    "difference_peak_residual_fraction_p95": 0.06620380512492854,
+    "pixel_noise_variance_vs_input": 0.16143234489835687,
+    "aperture_variance_inflation": 4.986104343859448,
+    "seconds_per_exposure": 0.009963959999731741
+   },
+   "adaptive": {
+    "centroid_rms_arcsec_moment": 0.056644355285872264,
+    "centroid_rms_arcsec_gaussfit": 0.050490958100108146,
+    "aperture_fraction_mean": 0.8307791296280489,
+    "aperture_fraction_scatter_percent": 1.823957271944022,
+    "difference_peak_residual_fraction_median": 0.12613202160116888,
+    "difference_peak_residual_fraction_p95": 0.19186550177808298,
+    "pixel_noise_variance_vs_input": 0.11106324509445083,
+    "aperture_variance_inflation": 6.143021588539748,
+    "seconds_per_exposure": 0.0076786599998740716
+   },
+   "exact": {
+    "centroid_rms_arcsec_moment": 0.07021099763353512,
+    "centroid_rms_arcsec_gaussfit": 0.057782427750810945,
+    "aperture_fraction_mean": 0.8454860573706501,
+    "aperture_fraction_scatter_percent": 1.7117981923364698,
+    "difference_peak_residual_fraction_median": 0.16777036812917856,
+    "difference_peak_residual_fraction_p95": 0.2765854386178818,
+    "pixel_noise_variance_vs_input": 0.13983776836572792,
+    "aperture_variance_inflation": 5.049420379190771,
+    "seconds_per_exposure": 0.014027450000139653
+   },
+   "native": {
+    "centroid_rms_arcsec_moment": 0.05857340140374001,
+    "centroid_rms_arcsec_gaussfit": 0.004751780383367177,
+    "aperture_fraction_mean": 0.8978735837719524,
+    "aperture_fraction_scatter_percent": 1.6201069609769512
+   }
+  }
+ }
+]

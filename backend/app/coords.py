@@ -23,6 +23,10 @@ from .simbad import resolve_name_astrometry, SimbadResolutionError
 # SPHEREx survey start, used as a sane "now-ish" default epoch when none is
 # requested (e.g. for a quick preview position before epochs are known).
 SURVEY_START = Time("2025-05-01")
+# Nominal epoch inside the SPHEREx survey, used only to place the archive
+# SEARCH cone. A high-PM star's J2000 position can be minutes of arc from
+# where SPHEREx saw it (Barnard's Star: 4.5'), see docs/AUDIT.md C3.
+SEARCH_REFERENCE_EPOCH = Time("2026-01-01")
 
 
 class CoordParseError(ValueError):
@@ -36,6 +40,15 @@ _SEXAGESIMAL_RE = re.compile(
         (?P<dec>[+-]?\d{1,2}d\s*\d{1,2}m\s*\d{1,2}(?:\.\d+)?s)
         \s*$""",
     re.VERBOSE | re.IGNORECASE,
+)
+# "08:55:10.83 -07:14:42.5" or "08 55 10.83 -07 14 42.5" (RA in hours).
+_SEXAGESIMAL_SEP_RE = re.compile(
+    r"""^\s*
+        (?P<ra>\d{1,2}[:\s]\d{1,2}[:\s]\d{1,2}(?:\.\d+)?)
+        \s*[,\s]\s*
+        (?P<dec>[+-]?\d{1,2}[:\s]\d{1,2}[:\s]\d{1,2}(?:\.\d+)?)
+        \s*$""",
+    re.VERBOSE,
 )
 _DECIMAL_RE = re.compile(
     r"^\s*(?P<ra>[+-]?\d+(?:\.\d+)?)\s*[,\s]\s*(?P<dec>[+-]?\d+(?:\.\d+)?)\s*$"
@@ -52,11 +65,17 @@ class ResolvedPosition:
     pmdec: Optional[float] = None   # mas/yr
     parallax_mas: Optional[float] = None
     name: Optional[str] = None      # SIMBAD main_id, if resolved by name
-    source: str = "coords"          # "coords" | "simbad" | "sesame"
+    source: str = "coords"          # "coords" | "simbad" | "sesame" | "catwise"
+    note: Optional[str] = None      # what was (or was not) done to give typed coordinates an epoch
 
     @property
     def has_proper_motion(self) -> bool:
         return self.pmra is not None and self.pmdec is not None
+
+    def search_position(self) -> SkyCoord:
+        """Where to centre an archive search: the position at a nominal
+        in-survey epoch (identical to `coord` when no PM is known)."""
+        return self.propagate_to(SEARCH_REFERENCE_EPOCH)
 
     def propagate_to(self, epoch: Time) -> SkyCoord:
         """Position at `epoch`, applying proper motion if we have it.
@@ -89,6 +108,18 @@ def _try_sexagesimal(text: str) -> Optional[SkyCoord]:
     if not m:
         return None
     return SkyCoord(m.group("ra"), m.group("dec"), frame="icrs")
+
+
+def _try_sexagesimal_separated(text: str) -> Optional[SkyCoord]:
+    m = _SEXAGESIMAL_SEP_RE.match(text)
+    if not m:
+        return None
+    ra = re.sub(r"[:\s]+", ":", m.group("ra"))
+    dec = re.sub(r"[:\s]+", ":", m.group("dec"))
+    try:
+        return SkyCoord(ra, dec, unit=(u.hourangle, u.deg), frame="icrs")
+    except ValueError as exc:
+        raise CoordParseError(f"Invalid sexagesimal coordinates {text!r}: {exc}") from exc
 
 
 def _try_decimal(text: str) -> Optional[SkyCoord]:
@@ -131,8 +162,53 @@ def _try_name(text: str) -> ResolvedPosition:
     return ResolvedPosition(coord=coord, ref_epoch=Time("J2000"), name=text, source="sesame")
 
 
-def parse_position(text: str) -> ResolvedPosition:
+# Search radius for the CatWISE track lookup around typed coordinates. A
+# 10"/yr mover is <= 55" from its CatWISE (2015.4) position anywhere in the
+# 2010-2021 window the lookup accepts.
+PM_LOOKUP_RADIUS_DEG = 1.5 / 60.0
+
+
+def _apply_pm_lookup(coord: SkyCoord) -> ResolvedPosition:
+    """Typed coordinates have no epoch (docs/AUDIT.md H1). Ask CatWISE2020
+    whether a catalogued fast mover's track passes through them; if exactly
+    one does, adopt its position and motion. Always records what happened
+    in `.note`, including failures."""
+    from .catalogs import catwise_sources, match_typed_position_to_track, CatalogError
+
+    fixed = ResolvedPosition(coord=coord, ref_epoch=Time("J2000"), source="coords")
+    try:
+        sources = catwise_sources(coord.ra.deg, coord.dec.deg, PM_LOOKUP_RADIUS_DEG)
+    except CatalogError as exc:
+        fixed.note = f"CatWISE lookup failed ({exc}); coordinates treated as fixed."
+        return fixed
+    match, reason = match_typed_position_to_track(coord.ra.deg, coord.dec.deg, sources)
+    if match is None:
+        fixed.note = f"CatWISE2020: {reason}; coordinates treated as fixed."
+        return fixed
+    src = match.source
+    return ResolvedPosition(
+        coord=SkyCoord(ra=src.ra_deg * u.deg, dec=src.dec_deg * u.deg, frame="icrs"),
+        ref_epoch=Time(src.ref_mjd, format="mjd"),
+        pmra=src.pmra_mas_yr,
+        pmdec=src.pmdec_mas_yr,
+        parallax_mas=None,
+        name=f"CatWISE {src.source_id}",
+        source="catwise",
+        note=(
+            f"Typed coordinates matched to a moving object: {reason}. Using its CatWISE2020 motion "
+            f"({src.pmra_mas_yr:.0f}, {src.pmdec_mas_yr:.0f}) mas/yr to predict where it is in each SPHEREx frame. "
+            "CatWISE motions of very fast or blended objects can be inaccurate; resolve the object by name for "
+            "better astrometry."
+        ),
+    )
+
+
+def parse_position(text: str, pm_lookup: bool = False) -> ResolvedPosition:
     """Parse `text` as coordinates, or resolve it as an object name.
+
+    `pm_lookup=True` additionally asks CatWISE2020 whether typed coordinates
+    lie on a catalogued fast mover's track (a network call; off by default
+    so the parser stays usable offline).
 
     Raises CoordParseError if nothing works.
     """
@@ -140,12 +216,11 @@ def parse_position(text: str) -> ResolvedPosition:
     if not text:
         raise CoordParseError("Empty position query.")
 
-    coord = _try_sexagesimal(text)
-    if coord is not None:
-        return ResolvedPosition(coord=coord, ref_epoch=Time("J2000"), source="coords")
-
-    coord = _try_decimal(text)
-    if coord is not None:
-        return ResolvedPosition(coord=coord, ref_epoch=Time("J2000"), source="coords")
+    for parser in (_try_sexagesimal, _try_sexagesimal_separated, _try_decimal):
+        coord = parser(text)
+        if coord is not None:
+            if pm_lookup:
+                return _apply_pm_lookup(coord)
+            return ResolvedPosition(coord=coord, ref_epoch=Time("J2000"), source="coords")
 
     return _try_name(text)

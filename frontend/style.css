@@ -252,3 +252,34 @@ button#clear-cache-btn {
   .controls { flex: 1 1 100%; }
   .layout { flex-direction: column; }
 }
+
+
+/* ---- Tracked sources panel ---- */
+.analysis-wrap { margin-top: 16px; }
+.analysis-toolbar { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 6px; }
+.analysis-table-scroll { overflow-x: auto; max-height: 280px; overflow-y: auto; }
+.analysis-table { border-collapse: collapse; width: 100%; font-size: 12px; font-variant-numeric: tabular-nums; }
+.analysis-table th, .analysis-table td { padding: 4px 8px; text-align: left; white-space: nowrap; border-bottom: 1px solid rgba(139, 150, 171, 0.2); }
+.analysis-table th { position: sticky; top: 0; background: var(--panel); color: var(--text-dim); font-weight: 600; }
+.analysis-table tbody tr { cursor: pointer; }
+.analysis-table tbody tr:hover { background: rgba(95, 176, 255, 0.08); }
+.analysis-table tbody tr.selected { background: rgba(124, 252, 154, 0.12); }
+.analysis-detail { margin-top: 10px; font-size: 13px; line-height: 1.45; }
+.analysis-detail h3 { font-size: 13px; margin: 0 0 6px; }
+.analysis-detail ul { margin: 2px 0 8px 18px; padding: 0; }
+.vote-box { margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(139, 150, 171, 0.2); }
+.vote-buttons { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
+.vote-buttons button.chosen { outline: 2px solid #7CFC9A; }
+
+/* ---- Shift-and-stack panel, badges ---- */
+.shiftstack-panel { margin: 8px 0 12px; font-size: 13px; line-height: 1.45; }
+.shiftstack-panel h3 { font-size: 13px; margin: 0 0 4px; }
+.kv-table { border-collapse: collapse; font-size: 12px; margin: 6px 0; }
+.kv-table th { text-align: left; font-weight: 600; color: var(--text-dim); padding: 2px 10px 2px 0; vertical-align: top; white-space: nowrap; }
+.kv-table td { padding: 2px 0; }
+.badge { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+.badge-ok { background: rgba(124, 252, 154, 0.15); color: #7CFC9A; }
+.badge-warn { background: rgba(255, 180, 84, 0.15); color: var(--warn); }
+.badge-dim { background: rgba(139, 150, 171, 0.2); color: var(--text-dim); }
+.uncertainty-box { margin: 6px 0 8px; padding: 6px 8px; border-left: 3px solid var(--warn); background: rgba(255, 180, 84, 0.06); font-size: 12px; }
+.uncertainty-box ul { margin: 4px 0 0 16px; padding: 0; }

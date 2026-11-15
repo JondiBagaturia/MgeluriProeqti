@@ -4,5 +4,13 @@ services:
     ports:
       - "8000:8000"
     restart: unless-stopped
-    # No volumes: the backend is stateless by design (PLAN.md) — nothing
-    # written to disk needs to survive a restart.
+    environment:
+      SPHEREX_DB_PATH: /data/discovery.sqlite
+    # Images and frames are never stored. The one thing that must survive a
+    # restart is the SQLite file with tracked candidates and volunteer
+    # classifications (backend/app/store.py).
+    volumes:
+      - spherex-data:/data
+
+volumes:
+  spherex-data:

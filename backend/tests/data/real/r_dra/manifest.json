@@ -1,0 +1,233 @@
+{
+ "note": "REAL SPHEREx observations (IRSA cutout service). Not synthetic.",
+ "retrieved_utc": "2026-11-14T23:42:10+00:00",
+ "query": "R Dra",
+ "fov_arcmin": 5.0,
+ "detectors": [
+  "D6",
+  "D3"
+ ],
+ "max_exposures_per_detector_epoch": 6,
+ "n_images_available": 201,
+ "n_requested": 36,
+ "n_cached": 29,
+ "cutout_centre_deg": [
+  248.1672332905331,
+  66.7550238005368
+ ],
+ "resolved": {
+  "source": "simbad",
+  "name": "V* R Dra",
+  "ra_deg": 248.16761083295,
+  "dec_deg": 66.75497941722,
+  "ref_epoch_mjd": 51544.5,
+  "pmra_mas_yr": -20.643,
+  "pmdec_mas_yr": 6.149,
+  "parallax_mas": 1.2509
+ },
+ "exposures": [
+  {
+   "file": "D6_2025W20_2D_0243_1.fits.gz",
+   "obs_id": "2025W20_2D_0243_1",
+   "detector": "D6",
+   "collection": "spherex_dr1",
+   "time_mjd": 60811.955829
+  },
+  {
+   "file": "D3_2025W20_2D_0243_1.fits.gz",
+   "obs_id": "2025W20_2D_0243_1",
+   "detector": "D3",
+   "collection": "spherex_dr1",
+   "time_mjd": 60811.955829
+  },
+  {
+   "file": "D6_2025W23_1C_0021_1.fits.gz",
+   "obs_id": "2025W23_1C_0021_1",
+   "detector": "D6",
+   "collection": "spherex_dr1",
+   "time_mjd": 60828.12619
+  },
+  {
+   "file": "D3_2025W23_1C_0021_1.fits.gz",
+   "obs_id": "2025W23_1C_0021_1",
+   "detector": "D3",
+   "collection": "spherex_dr1",
+   "time_mjd": 60828.12619
+  },
+  {
+   "file": "D6_2025W23_2B_0130_1.fits.gz",
+   "obs_id": "2025W23_2B_0130_1",
+   "detector": "D6",
+   "collection": "spherex_dr1",
+   "time_mjd": 60832.138575
+  },
+  {
+   "file": "D3_2025W23_2B_0130_1.fits.gz",
+   "obs_id": "2025W23_2B_0130_1",
+   "detector": "D3",
+   "collection": "spherex_dr1",
+   "time_mjd": 60832.138575
+  },
+  {
+   "file": "D6_2025W23_2B_0398_1.fits.gz",
+   "obs_id": "2025W23_2B_0398_1",
+   "detector": "D6",
+   "collection": "spherex_dr1",
+   "time_mjd": 60833.365864
+  },
+  {
+   "file": "D3_2025W23_2B_0603_2.fits.gz",
+   "obs_id": "2025W23_2B_0603_2",
+   "detector": "D3",
+   "collection": "spherex_dr1",
+   "time_mjd": 60834.31126
+  },
+  {
+   "file": "D6_2025W24_1A_0631_2.fits.gz",
+   "obs_id": "2025W24_1A_0631_2",
+   "detector": "D6",
+   "collection": "spherex_dr1",
+   "time_mjd": 60838.254362
+  },
+  {
+   "file": "D3_2025W24_1A_0631_3.fits.gz",
+   "obs_id": "2025W24_1A_0631_3",
+   "detector": "D3",
+   "collection": "spherex_dr1",
+   "time_mjd": 60838.255854
+  },
+  {
+   "file": "D3_2025W24_2D_0074_1.fits.gz",
+   "obs_id": "2025W24_2D_0074_1",
+   "detector": "D3",
+   "collection": "spherex_dr1",
+   "time_mjd": 60838.864463
+  },
+  {
+   "file": "D3_2025W52_2A_0227_3.fits.gz",
+   "obs_id": "2025W52_2A_0227_3",
+   "detector": "D3",
+   "collection": "spherex_dr1",
+   "time_mjd": 61035.55898
+  },
+  {
+   "file": "D6_2026W01_1A_0257_3.fits.gz",
+   "obs_id": "2026W01_1A_0257_3",
+   "detector": "D6",
+   "collection": "spherex_dr1",
+   "time_mjd": 61039.155048
+  },
+  {
+   "file": "D3_2026W01_1A_0257_4.fits.gz",
+   "obs_id": "2026W01_1A_0257_4",
+   "detector": "D3",
+   "collection": "spherex_dr1",
+   "time_mjd": 61039.15654
+  },
+  {
+   "file": "D6_2026W01_1A_0534_4.fits.gz",
+   "obs_id": "2026W01_1A_0534_4",
+   "detector": "D6",
+   "collection": "spherex_dr1",
+   "time_mjd": 61040.583135
+  },
+  {
+   "file": "D3_2026W01_1A_0656_1.fits.gz",
+   "obs_id": "2026W01_1A_0656_1",
+   "detector": "D3",
+   "collection": "spherex_dr1",
+   "time_mjd": 61041.189044
+  },
+  {
+   "file": "D6_2026W01_2A_0426_2.fits.gz",
+   "obs_id": "2026W01_2A_0426_2",
+   "detector": "D6",
+   "collection": "spherex_dr1",
+   "time_mjd": 61043.5688
+  },
+  {
+   "file": "D3_2026W01_2A_0426_2.fits.gz",
+   "obs_id": "2026W01_2A_0426_2",
+   "detector": "D3",
+   "collection": "spherex_dr1",
+   "time_mjd": 61043.5688
+  },
+  {
+   "file": "D6_2026W03_1A_0304_4.fits.gz",
+   "obs_id": "2026W03_1A_0304_4",
+   "detector": "D6",
+   "collection": "spherex_dr1",
+   "time_mjd": 61053.414626
+  },
+  {
+   "file": "D3_2026W17_1B_0434_1.fits.gz",
+   "obs_id": "2026W17_1B_0434_1",
+   "detector": "D3",
+   "collection": "spherex_dr1",
+   "time_mjd": 61152.331052
+  },
+  {
+   "file": "D6_2026W17_1B_0434_1.fits.gz",
+   "obs_id": "2026W17_1B_0434_1",
+   "detector": "D6",
+   "collection": "spherex_dr1",
+   "time_mjd": 61152.331052
+  },
+  {
+   "file": "D3_2026W17_2A_0255_2.fits.gz",
+   "obs_id": "2026W17_2A_0255_2",
+   "detector": "D3",
+   "collection": "spherex_dr1",
+   "time_mjd": 61154.639889
+  },
+  {
+   "file": "D3_2026W19_2A_1339_2.fits.gz",
+   "obs_id": "2026W19_2A_1339_2",
+   "detector": "D3",
+   "collection": "spherex_dr1",
+   "time_mjd": 61170.938846
+  },
+  {
+   "file": "D3_2026W20_2A_0294_4.fits.gz",
+   "obs_id": "2026W20_2A_0294_4",
+   "detector": "D3",
+   "collection": "spherex_qr3",
+   "time_mjd": 61176.366728
+  },
+  {
+   "file": "D6_2026W20_2A_0294_4.fits.gz",
+   "obs_id": "2026W20_2A_0294_4",
+   "detector": "D6",
+   "collection": "spherex_qr3",
+   "time_mjd": 61176.366728
+  },
+  {
+   "file": "D6_2026W21_2A_0325_4.fits.gz",
+   "obs_id": "2026W21_2A_0325_4",
+   "detector": "D6",
+   "collection": "spherex_qr3",
+   "time_mjd": 61183.494982
+  },
+  {
+   "file": "D3_2026W21_2A_0325_4.fits.gz",
+   "obs_id": "2026W21_2A_0325_4",
+   "detector": "D3",
+   "collection": "spherex_qr3",
+   "time_mjd": 61183.494982
+  },
+  {
+   "file": "D3_2026W24_2B_0242_4.fits.gz",
+   "obs_id": "2026W24_2B_0242_4",
+   "detector": "D3",
+   "collection": "spherex_qr3",
+   "time_mjd": 61203.860905
+  },
+  {
+   "file": "D6_2026W24_2B_0242_4.fits.gz",
+   "obs_id": "2026W24_2B_0242_4",
+   "detector": "D6",
+   "collection": "spherex_qr3",
+   "time_mjd": 61203.860905
+  }
+ ]
+}

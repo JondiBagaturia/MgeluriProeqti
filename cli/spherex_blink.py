@@ -29,7 +29,7 @@ def main() -> int:
     parser.add_argument("position", help="RA/Dec (sexagesimal or decimal) or object name")
     parser.add_argument("--fov", type=float, default=None, help="Field of view, arcmin (default from config)")
     parser.add_argument("--detectors", nargs="+", default=None, help="Detector subset, e.g. D6 D2 (default from config)")
-    parser.add_argument("--mode", choices=["epoch", "detector_epoch", "single"], default="epoch")
+    parser.add_argument("--mode", choices=["epoch", "detector_epoch", "single"], default="detector_epoch")
     parser.add_argument("-o", "--outdir", default="./out", help="Output directory")
     args = parser.parse_args()
 
