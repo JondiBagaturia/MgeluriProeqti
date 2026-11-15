@@ -72,7 +72,7 @@
   const detectorViewSelect = $("detector-view-select");
   // Bump when the frame wire format changes, so stale IndexedDB entries
   // (e.g. frames without grid WCS / photometry) are never revived.
-  const FRAME_SCHEMA = "v5";
+  const FRAME_SCHEMA = "v7"; // v7: frames carry saturation_mask_b64
   // Click within this distance of the predicted target position -> spectrum
   // follows the target's proper motion per exposure (2 native pixels).
   const TRACK_CLICK_RADIUS_ARCSEC = 12.3;
@@ -246,6 +246,25 @@
     return { toStage, pixel: sx };
   }
 
+  /** False-colour composite: grid pixels with no usable value in some channel
+   * get a diagonal hatch ("/"), saturation-flagged ones a cross ("✕"), drawn
+   * at screen resolution over the grey the composite already put there. */
+  function drawRgbMaskOverlay(grid, toStage, pixel) {
+    if (pixel < 4) return;   // too small to hatch; the grey checker in the image still shows them
+    const m = grid.rgb.masked, W = grid.width, h = pixel / 2;
+    overlayCtx.strokeStyle = "rgba(0, 0, 0, 0.75)";
+    overlayCtx.lineWidth = 1;
+    overlayCtx.beginPath();
+    for (let i = 0; i < m.length; i++) {
+      if (!m[i]) continue;
+      const ay = Math.floor(i / W), ax = i - ay * W;
+      const [cx, cy] = toStage(ax, ay);
+      overlayCtx.moveTo(cx - h, cy + h); overlayCtx.lineTo(cx + h, cy - h);
+      if (m[i] === 2) { overlayCtx.moveTo(cx - h, cy - h); overlayCtx.lineTo(cx + h, cy + h); }
+    }
+    overlayCtx.stroke();
+  }
+
   function drawOverlay() {
     const s = stage.getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;
@@ -298,7 +317,10 @@
     // Tracked sources (not on the mean image: a mover has no single place there).
     const series = currentSeriesAnalysis();
     if (!series || viewMode === "sum") return;
-    const frameIdx = viewMode === "blink" ? state.currentIndex : null;
+    if (viewMode === "rgb" && grid.rgb) drawRgbMaskOverlay(grid, toStage, pixel);
+    // False colour: the markers of the selected detector series in the epoch shown.
+    const frameIdx = viewMode === "blink" ? state.currentIndex : viewMode === "rgb" ? rgb.overlayFrameIdx : null;
+    if (viewMode === "rgb" && frameIdx == null) return;   // that series has no frame in this epoch
     const sel = selectedTrack();
 
     if (showTracksCheckbox.checked) {
@@ -386,6 +408,37 @@
     runSearch();
   });
 
+  /** Banner whenever the data shown are the locally downloaded copy
+   * (app/localdata.py) rather than a live IRSA query. null hides it. */
+  function showDataSource(note, field) {
+    if (!note) {
+      dataSourceBanner.hidden = !state.offlineModeNote;
+      dataSourceBanner.textContent = "";
+      if (state.offlineModeNote) dataSourceBanner.appendChild(el("span", state.offlineModeNote));
+      return;
+    }
+    dataSourceBanner.textContent = "";
+    dataSourceBanner.appendChild(el("strong", "Local data. "));
+    dataSourceBanner.appendChild(el("span", note));
+    dataSourceBanner.hidden = false;
+  }
+
+  async function checkDataMode() {
+    try {
+      const r = await fetch(`${API_BASE}/api/local-data`);
+      if (!r.ok) return;
+      const d = await r.json();
+      if (d.mode === "cached") {
+        const names = (d.fields || []).map((f) => `${f.query || f.name} (${f.detectors.join("+")})`).join(", ");
+        state.offlineModeNote = `Offline mode (SPHEREX_DATA_MODE=cached): no network; only the downloaded fields can be searched: ${names || "none found"}.`;
+        showDataSource(null);
+      }
+    } catch (e) {
+      /* older backend without /api/local-data: nothing to show */
+    }
+  }
+  checkDataMode();
+
   async function fetchReleaseTag() {
     try {
       const resp = await fetch(`${API_BASE}/api/releases`);
@@ -426,6 +479,7 @@
     state.frames = [];
     state.allFrames = [];
     state.analysis = null;
+    showDataSource(null);
     state.selectedRank = null;
     state.currentIndex = 0;
     detectorViewSelect.innerHTML = "";
@@ -500,6 +554,8 @@
       const cachedAnalysis = cached.find((c) => c && c.__analysis);
       state.analysis = cachedAnalysis ? cachedAnalysis.__analysis : null;
       state.allFrames = cached.filter((c) => !(c && c.__analysis)).map(reviveFrame);
+      const localFrame = state.allFrames.find((f) => f.dataSource === "local_cache");
+      if (localFrame) showDataSource(localFrame.dataSourceNote);
       applyDetectorFilter(false);
       progressText.textContent = `Loaded ${state.allFrames.length} frame(s) from local cache`;
       progressBar.style.width = "100%";
@@ -714,6 +770,10 @@
           showProgress();
           continue;
         }
+        if (obj.type === "data_source") {
+          showDataSource(obj.note, obj.field);
+          continue;
+        }
         if (obj.type === "analysis") {
           state.analysis = obj;
           renderAnalysis();
@@ -742,6 +802,10 @@
           nGapFilledPixels: obj.n_gap_filled_pixels,
           gapFilledIndices: obj.gap_filled_indices || [],
           gapFilled: new Set(obj.gap_filled_indices || []),
+          saturationMaskB64: obj.saturation_mask_b64 || null,
+          dataSource: obj.data_source || "irsa_live",
+          dataSourceNote: obj.data_source_note || "",   // kept packed: survives the IndexedDB cache as-is
+          nSaturationFlaggedPixels: obj.n_saturation_flagged_pixels != null ? obj.n_saturation_flagged_pixels : null,
           photometry: obj.photometry || null,
           targetPixel: obj.target_pixel || null,
           gridWcs: obj.grid_wcs || null,
@@ -785,6 +849,9 @@
     }
     progressText.textContent = `Done: ${state.allFrames.length} frame(s)`;
     hideProgressLater(2000);
+    // Never store a local-copy result (app/localdata.py) under the live key:
+    // once IRSA is back, the same search must query it again.
+    if (state.allFrames.some((f) => f.dataSource === "local_cache")) return;
 
     // Cache the whole set now that the stream is complete.
     const serializable = state.allFrames.map(({ gapFilled, ...f }) => ({ ...f, data: f.data.buffer.slice(0) }));
@@ -955,6 +1022,8 @@
         `A mover shows as a dark/bright pair. Stationary bright stars also leave residuals (no PSF matching).`;
     } else if (viewMode === "shiftstack") {
       renderShiftStackView();
+    } else if (viewMode === "rgb") {
+      renderRgbView();
     } else if (viewMode === "sum") {
       const first = state.frames[0];
       const sum = new Float32Array(first.width * first.height);
@@ -1077,7 +1146,8 @@
     frameLabel.textContent =
       `Frame ${state.currentIndex + 1}/${state.frames.length}   ${dateRange}\n` +
       `Detectors: ${frame.detectors.join(",")}   λ ${waveStr}\n` +
-      `${frame.nExposures} exposure(s) combined${partial}${gapFilled}`;
+      `${frame.nExposures} exposure(s) combined${partial}${gapFilled}` +
+      (frame.dataSource === "local_cache" ? "\nData: local copy downloaded earlier (not live IRSA)" : "");
   }
 
   // ---------------------------------------------------------------------
@@ -1221,6 +1291,15 @@
       return;
     }
     const pos = Number.isFinite(hit.ra) ? `RA ${hit.ra.toFixed(5)}  Dec ${hit.dec.toFixed(5)}` : "(no WCS - reload)";
+    const rg = state.lastRenderedGrid && state.lastRenderedGrid.rgb;
+    if (rg) {
+      const idx = hit.ay * state.lastRenderedGrid.width + hit.ax;
+      const parts = rg.channels.map((c) => c.values ? `${c.c} ${c.label} ${Number.isFinite(c.values[idx]) ? c.values[idx].toFixed(3) : "—"}` : `${c.c} ${c.label}`);
+      pixelReadout.textContent = rg.masked[idx]
+        ? `${pos}   ${rg.masked[idx] === 2 ? "masked: saturation / non-linearity flag in at least one channel" : "masked: no usable value in at least one channel"}`
+        : `${pos}   background-subtracted MJy/sr: ${parts.join(" · ")}`;
+      return;
+    }
     const val = Number.isFinite(hit.phys)
       ? `${hit.phys.toFixed(4)} MJy/sr${hit.interpolated ? " (interpolated for display, not data)" : ""}`
       : "no data";
@@ -1355,6 +1434,8 @@
   const analysisTableBody = $("analysis-table-body");
   const analysisDetail = $("analysis-detail");
   const showTracksCheckbox = $("show-tracks-checkbox");
+  const dataSourceBanner = $("data-source-banner");
+  const rankOrderSelect = $("rank-order-select");
   const exportJsonBtn = $("export-json-btn");
   const exportCsvBtn = $("export-csv-btn");
 
@@ -1461,18 +1542,27 @@
     if (series.n_frames < 2) notes.push("Only one frame: no motion or variability can be measured.");
     if (series.warning) notes.push(series.warning);
     if (a.catalog_errors && a.catalog_errors.length) notes.push(`Catalogue problem: ${a.catalog_errors.join("; ")}`);
+    const localCats = Object.entries(a.catalog_source || {}).filter(([, v]) => v === "local_cache").map(([k]) => k.replace("gaia_dr3", "Gaia DR3").replace("catwise2020", "CatWISE2020"));
+    if (localCats.length) notes.push(`Catalogue matching used ${localCats.join(" and ")} rows downloaded earlier (local copy), not a live query.`);
     if (a.store_error) notes.push(`Classification storage unavailable: ${a.store_error}`);
-    notes.push("Ranked by anomaly score (0–1: weighted motion, variability, missing catalogue counterpart). It is not a probability, and no object type is estimated.");
+    notes.push("Two rankings are shown: the raw Phase Two anomaly score (0–1: weighted motion, variability, missing catalogue counterpart) and a calibrated score with the same weights whose inputs are corrected for brightness, coverage, catalogue completeness and quality. Neither is a probability, and no object type is estimated.");
     analysisStatus.textContent = notes.join(" ");
 
-    for (const t of series.tracks) {
+    const ordered = series.tracks.slice().sort((a, b) =>
+      rankOrderSelect.value === "calibrated" && a.calibrated_rank != null ? a.calibrated_rank - b.calibrated_rank : a.rank - b.rank);
+    for (const t of ordered) {
       const tr = document.createElement("tr");
       if (t.rank === state.selectedRank) tr.className = "selected";
       const labelCell = el("td", t.label);
       labelCell.style.color = LABEL_COLORS[t.label] || "";
-      tr.appendChild(el("td", String(t.rank)));
+      tr.appendChild(el("td", rankOrderSelect.value === "calibrated" && t.calibrated_rank != null ? String(t.calibrated_rank) : String(t.rank)));
       tr.appendChild(labelCell);
       tr.appendChild(el("td", t.anomaly_score.toFixed(2)));
+      const cal = t.calibration;
+      const reduced = cal && (cal.calibrated_score + 1e-9 < t.anomaly_score);
+      const calCell = el("td", cal ? `${cal.calibrated_score.toFixed(2)}${reduced ? " ▼" : ""}` : "—");
+      if (cal && cal.suppression_reasons.length) calCell.title = cal.suppression_reasons.join(" ");
+      tr.appendChild(calCell);
       tr.appendChild(el("td", t.reliability));
       tr.appendChild(el("td", t.detection_snr_median.toFixed(0)));
       tr.appendChild(el("td", `${t.n_epochs}/${t.n_frames_in_series}`));
@@ -1510,6 +1600,41 @@
     analysisDetail.appendChild(why);
 
     // --- astrometry: linear fit (reported) and parallax-aware fit (shown, not adopted unless constrained) ---
+    // --- calibrated ranking (Phase 3, Priority 2), next to the raw Phase 2 numbers ---
+    const cal = t.calibration;
+    if (cal) {
+      const cb = el("div");
+      cb.appendChild(el("strong", `Calibrated ranking: ${cal.calibrated_score.toFixed(2)} (raw Phase 2 score ${t.anomaly_score.toFixed(2)}; calibrated rank #${t.calibrated_rank}, raw rank #${t.rank})`));
+      const cl = el("ul");
+      const rc = t.score_components;
+      cl.appendChild(el("li", `Components, raw → calibrated: motion ${rc.motion.toFixed(2)} → ${cal.M_norm.toFixed(2)}, variability ${rc.variability.toFixed(2)} → ${cal.V_norm.toFixed(2)}, ` +
+        `no catalogue counterpart ${rc.no_catalogue_counterpart.toFixed(2)} → ${cal.C_norm.toFixed(2)} (weights 0.45 / 0.30 / 0.25).`));
+      const mc = cal.motion_calibration;
+      if (mc && mc.available) {
+        const lvl = mc.peer_level === "analytic" ? "too few peers: the analytic error model is used (no correction)"
+          : `${mc.n_peers} clean peers (${mc.peer_level.replace(/_/g, " ")}; S/N ${mc.snr_bin[0]}–${Number.isFinite(mc.snr_bin[1]) ? mc.snr_bin[1] : "∞"}, ${mc.coverage_bin} epochs)`;
+        cl.appendChild(el("li", `Motion significance calibrated against ${lvl}: inflation ×${mc.inflation.toFixed(2)}` +
+          `${mc.inflation_capped ? " (capped)" : ""}; p = ${mc.p_analytic.toExponential(1)} → ${mc.p_calibrated.toExponential(1)}` +
+          `${mc.empirical_rarity_bound != null ? `; ${mc.n_peers_at_least_as_extreme} of ${mc.n_peers} peers at least as extreme (≤ ${mc.empirical_rarity_bound.toFixed(2)})` : ""}.`));
+      }
+      const vc = cal.variability_calibration;
+      if (vc && vc.available) {
+        cl.appendChild(el("li", `Variability calibrated (${vc.peer_level.replace(/_/g, " ")}, ${vc.n_peers} peers): inflation ×${vc.inflation.toFixed(2)}; p = ${vc.p_analytic.toExponential(1)} → ${vc.p_calibrated.toExponential(1)}.`));
+      }
+      const REG = { matched: "matched", above_completeness: "unmatched, and bright enough that it should be in the catalogue",
+        below_completeness: "unmatched, but fainter than the local completeness limit: expected to be missing",
+        completeness_unknown: "unmatched; completeness could not be estimated here (half weight)",
+        catalogue_incomplete_here: "unmatched, but the catalogue matches none of the clean sources in this field (no coverage)",
+        unavailable: "catalogue query failed or not run" };
+      for (const [name, c] of Object.entries(cal.completeness)) {
+        const lim = c.completeness_flux_mjy != null ? ` (local limit ${fmtFlux(c.completeness_flux_mjy)} mJy, source ${fmtFlux(c.source_flux_mjy)} mJy)` : "";
+        cl.appendChild(el("li", `${name}: ${REG[c.regime] || c.regime}${lim}.`));
+      }
+      for (const r of cal.explanation.concat(cal.suppression_reasons)) cl.appendChild(el("li", r));
+      cb.appendChild(cl);
+      analysisDetail.appendChild(cb);
+    }
+
     const ast = el("div");
     ast.appendChild(el("strong", "Astrometry"));
     const al = el("ul");
@@ -1652,6 +1777,7 @@
       "parallax_fit_mas", "parallax_fit_err_mas", "parallax_constrained", "mean_flux_mjy", "variability_p_value",
       "wavelength_mismatch", "gaia_status", "gaia_source_id", "gaia_separation_arcsec", "catwise_status", "catwise_source_id",
       "catwise_separation_arcsec", "flags", "reasons", "caveats", "candidate_id",
+      "calibrated_score", "calibrated_rank", "M_norm", "V_norm", "C_norm", "completeness_regime", "quality_cap", "suppression_reasons",
     ];
     const quote = (v) => (v == null ? "" : /[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : String(v));
     const lines = [cols.join(",")];
@@ -1672,6 +1798,11 @@
           catwise_status: t.catwise.status, catwise_source_id: t.catwise.source ? t.catwise.source.source_id : "",
           catwise_separation_arcsec: t.catwise.separation_arcsec,
           flags: t.flags.join("|"), reasons: t.reasons.join(" | "), caveats: t.caveats.join(" | "), candidate_id: t.candidate_id || "",
+          calibrated_score: t.calibration ? t.calibration.calibrated_score : "", calibrated_rank: t.calibrated_rank != null ? t.calibrated_rank : "",
+          M_norm: t.calibration ? t.calibration.M_norm : "", V_norm: t.calibration ? t.calibration.V_norm : "",
+          C_norm: t.calibration ? t.calibration.C_norm : "", completeness_regime: t.calibration ? t.calibration.completeness_regime : "",
+          quality_cap: t.calibration ? t.calibration.quality_cap : "",
+          suppression_reasons: t.calibration ? t.calibration.suppression_reasons.join(" | ") : "",
         };
         lines.push(cols.map((c) => quote(row[c])).join(","));
       }
@@ -1680,6 +1811,7 @@
   });
 
   showTracksCheckbox.addEventListener("change", renderView);
+  rankOrderSelect.addEventListener("change", renderAnalysis);
 
   // ---------------------------------------------------------------------
   // Shift-and-stack (app/stream.py: run_shift_stack). Optional; requested
@@ -1874,7 +2006,8 @@
   const stTableBody = $("st-table-body");
   const stStatus = $("st-status");
   const stBody = $("st-body");
-  const EPOCH_COLORS = ["#8b9bea", "#f0b64e", "#8fe6a0", "#f08aa6", "#c0a2ea", "#e9e27a"];
+  // Okabe-Ito (colour-blind safe), ordered for contrast on the dark background
+  const EPOCH_COLORS = ["#56B4E9", "#E69F00", "#009E73", "#CC79A7", "#F0E442", "#D55E00", "#0072B2", "#FFFFFF"];
   const ST_FONT = '13px "Almendra", Georgia, serif';
   const STATE_TEXT = {
     valid: "valid",
@@ -1990,8 +2123,13 @@
         drawSed(s);
       });
       lab.appendChild(cb);
-      const sw = el("span", ` Epoch ${e.index + 1}: ${fmtDate(e.mjd_min)}…${fmtDate(e.mjd_max)} (${(e.mjd_max - e.mjd_min).toFixed(1)} d)`);
-      sw.style.color = EPOCH_COLORS[i % EPOCH_COLORS.length];
+      const col = EPOCH_COLORS[i % EPOCH_COLORS.length];
+      const chip = el("span", "", "st-epoch-chip");
+      chip.style.background = col;
+      lab.appendChild(chip);
+      const nE = s.measurements.filter((m) => m.epoch_index === e.index).length;
+      const sw = el("span", ` Epoch ${e.index + 1}: ${fmtDate(e.mjd_min)}…${fmtDate(e.mjd_max)} (${(e.mjd_max - e.mjd_min).toFixed(1)} d, ${nE} exposures)`);
+      sw.style.color = col;
       lab.appendChild(sw);
       stEpochBoxes.appendChild(lab);
     });
@@ -2002,99 +2140,339 @@
     renderStTable(s);
   }
 
-  /** SED: one panel per detector (broken wavelength axis, so the gap between
-   * detectors is never drawn as if observed), shared log or linear y. */
+  // Nominal SPHEREx detector bands (µm). Only used to SHADE the axis so coverage
+  // gaps and detectors missing from this search are obvious; every point is
+  // placed at its own measured wavelength_um, never at a band centre.
+  const SPHEREX_BANDS = [
+    ["D1", 0.75, 1.11], ["D2", 1.11, 1.64], ["D3", 1.64, 2.42],
+    ["D4", 2.42, 3.82], ["D5", 3.82, 4.42], ["D6", 4.42, 5.00],
+  ];
+  const SPHEREX_RANGE = [0.75, 5.0];
+  const DET_MARKERS = { D1: "circle", D2: "square", D3: "diamond", D4: "triangle", D5: "hexagon", D6: "star" };
+  const DET_MARKER_TEXT = { circle: "●", square: "■", diamond: "◆", triangle: "▲", hexagon: "⬢", star: "★" };
+  const stRangeSelect = $("st-range-select");
+  const stScaleSelect = $("st-scale-select");
+  const stShowFlagged = $("st-show-flagged");
+  const stShowLimits = $("st-show-limits");
+  const stShowNoflux = $("st-show-noflux");
+  const stShowModel = $("st-show-model");
+  const stSedCaption = $("st-sed-caption");
+  const stTooltip = $("st-tooltip");
+
+  function markerPath(ctx, shape, x, y, r) {
+    ctx.beginPath();
+    if (shape === "square") { ctx.rect(x - r * 0.85, y - r * 0.85, 1.7 * r, 1.7 * r); return; }
+    if (shape === "diamond") { ctx.moveTo(x, y - 1.25 * r); ctx.lineTo(x + 1.05 * r, y); ctx.lineTo(x, y + 1.25 * r); ctx.lineTo(x - 1.05 * r, y); ctx.closePath(); return; }
+    if (shape === "triangle") { ctx.moveTo(x, y - 1.25 * r); ctx.lineTo(x + 1.15 * r, y + 0.8 * r); ctx.lineTo(x - 1.15 * r, y + 0.8 * r); ctx.closePath(); return; }
+    if (shape === "hexagon" || shape === "star") {
+      const n = shape === "star" ? 10 : 6;
+      for (let k = 0; k < n; k++) {
+        const a = -Math.PI / 2 + (2 * Math.PI * k) / n;
+        const rr = shape === "star" ? (k % 2 ? 0.75 * r : 1.7 * r) : 1.1 * r;
+        k ? ctx.lineTo(x + rr * Math.cos(a), y + rr * Math.sin(a)) : ctx.moveTo(x + rr * Math.cos(a), y + rr * Math.sin(a));
+      }
+      ctx.closePath();
+      return;
+    }
+    ctx.arc(x, y, r, 0, 2 * Math.PI);
+  }
+
+  function niceLinearTicks(lo, hi, n) {
+    const span = hi - lo;
+    if (!(span > 0)) return [lo];
+    const raw = span / n, mag = Math.pow(10, Math.floor(Math.log10(raw)));
+    const step = [1, 2, 2.5, 5, 10].map((f) => f * mag).find((s) => span / s <= n) || 10 * mag;
+    const out = [];
+    for (let v = Math.ceil(lo / step) * step; v <= hi + 1e-9 * span; v += step) out.push(Math.abs(v) < 1e-12 * step ? 0 : v);
+    return out;
+  }
+  /** Tick label with only the decimals the tick spacing needs (30, not 30.00). */
+  function tickText(v, ticks) {
+    if (v === 0) return "0";
+    const steps = ticks.slice(1).map((t, i) => Math.abs(t - ticks[i])).filter((d) => d > 0);
+    const step = steps.length ? Math.min(...steps) : Math.abs(v);
+    let dec = 0;
+    while (dec < 4 && Math.abs(step * 10 ** dec - Math.round(step * 10 ** dec)) > 1e-6 * 10 ** dec) dec++;
+    return v.toFixed(dec);
+  }
+  function logTicks(lo, hi) {
+    const out = [];
+    const decades = Math.log10(hi) - Math.log10(lo);
+    const mults = decades > 3 ? [1] : decades > 1.3 ? [1, 3] : [1, 2, 5];
+    for (let e = Math.floor(Math.log10(lo)); e <= Math.ceil(Math.log10(hi)); e++) {
+      for (const m of mults) { const v = m * Math.pow(10, e); if (v >= lo && v <= hi) out.push(v); }
+    }
+    return out;
+  }
+
+  /** Spectrum by epoch: ONE shared wavelength axis for all detectors. Every
+   * point is one exposure on native pixels at its own wavelength; nothing is
+   * averaged or merged across exposures, epochs or detectors. */
   function drawSed(s) {
     const ctx = stSedCanvas.getContext("2d");
     const W = stSedCanvas.width, H = stSedCanvas.height;
     ctx.clearRect(0, 0, W, H);
     ctx.font = ST_FONT;
     st.hoverPoints = [];
-    const ms = s.measurements;
-    const dets = s.detectors;
-    const shown = ms.filter((m) => st.selectedEpochs.set.has(m.epoch_index));
-    const vals = shown.filter((m) => m.flux_mjy != null && (m.state === "valid" || m.state === "valid_flagged"))
-      .map((m) => [m.flux_mjy - m.flux_err_mjy, m.flux_mjy + m.flux_err_mjy]).flat()
-      .concat(shown.filter((m) => m.state === "below_threshold").map((m) => m.upper_limit_mjy));
-    const pos = vals.filter((v) => v > 0);
-    const padL = 58, padB = 34, padT = 10, gap = 26;
-    if (!pos.length) {
-      ctx.fillStyle = "#8f8160";
-      ctx.fillText("No valid flux in the selected epochs (see the measurement table for why).", padL, H / 2);
-    }
-    const lo = pos.length ? Math.min(...pos) : 1, hi = pos.length ? Math.max(...pos) : 10;
-    const useLog = hi / lo > 5;
-    const yMin = useLog ? lo / 1.5 : Math.min(0, lo - 0.1 * (hi - lo)), yMax = useLog ? hi * 1.5 : hi + 0.1 * (hi - lo);
-    const yOf = (f) => {
-      if (useLog) return padT + (1 - (Math.log10(Math.max(f, yMin)) - Math.log10(yMin)) / (Math.log10(yMax) - Math.log10(yMin))) * (H - padT - padB);
-      return padT + (1 - (f - yMin) / (yMax - yMin || 1)) * (H - padT - padB);
-    };
-    const panelW = (W - padL - 10 - gap * (dets.length - 1)) / Math.max(dets.length, 1);
-    ctx.fillStyle = "#8f8160";
-    ctx.fillText(`${fmtFlux(yMax)}`, 4, padT + 8);
-    ctx.fillText(`${fmtFlux(yMin)}`, 4, H - padB);
-    ctx.save(); ctx.translate(12, H / 2 + 30); ctx.rotate(-Math.PI / 2);
-    ctx.fillText(`F_ν (mJy${useLog ? ", log" : ""})`, 0, 0); ctx.restore();
-    dets.forEach((det, k) => {
-      const dm = ms.filter((m) => m.detector === det && m.wavelength_um != null);
-      if (!dm.length) return;
-      const l0 = Math.min(...dm.map((m) => m.wavelength_um)) - 0.02, l1 = Math.max(...dm.map((m) => m.wavelength_um)) + 0.02;
-      const x0 = padL + k * (panelW + gap);
-      const xOf = (l) => x0 + ((l - l0) / (l1 - l0)) * panelW;
-      ctx.strokeStyle = "rgba(125,107,69,0.7)";
-      ctx.strokeRect(x0, padT, panelW, H - padT - padB);
-      ctx.fillStyle = "#8f8160";
-      ctx.fillText(`${det}: ${l0.toFixed(2)}–${l1.toFixed(2)} µm`, x0 + 4, H - 4);
-      if (k > 0) ctx.fillText("//", x0 - gap / 2 - 5, H - padB + 4);
-      // per-epoch wavelength coverage bars (what was actually sampled)
-      s.epochs.forEach((e, i) => {
-        if (!st.selectedEpochs.set.has(e.index)) return;
-        const em = dm.filter((m) => m.epoch_index === e.index);
-        ctx.fillStyle = EPOCH_COLORS[i % EPOCH_COLORS.length];
-        for (const m of em) {
-          const bw = m.bandwidth_um || 0.04;
-          ctx.globalAlpha = 0.5;
-          ctx.fillRect(xOf(m.wavelength_um - bw / 2), H - padB + 4 + 4 * i, Math.max(1, xOf(m.wavelength_um + bw / 2) - xOf(m.wavelength_um - bw / 2)), 3);
-          ctx.globalAlpha = 1;
-        }
-      });
-      for (const m of dm) {
-        if (!st.selectedEpochs.set.has(m.epoch_index)) continue;
-        const i = s.epochs.findIndex((e) => e.index === m.epoch_index);
-        const col = EPOCH_COLORS[i % EPOCH_COLORS.length];
-        const x = xOf(m.wavelength_um);
-        let y;
-        if ((m.state === "valid" || m.state === "valid_flagged") && m.flux_mjy != null) {
-          y = yOf(m.flux_mjy);
-          ctx.strokeStyle = col; ctx.lineWidth = 1;
-          ctx.beginPath(); ctx.moveTo(x, yOf(m.flux_mjy - m.flux_err_mjy)); ctx.lineTo(x, yOf(m.flux_mjy + m.flux_err_mjy)); ctx.stroke();
-          ctx.beginPath(); ctx.arc(x, y, 3, 0, 2 * Math.PI);
-          if (m.state === "valid") { ctx.fillStyle = col; ctx.fill(); } else { ctx.stroke(); }   // hollow = flagged
-        } else if (m.state === "below_threshold") {
-          y = yOf(m.upper_limit_mjy);
-          ctx.strokeStyle = col; ctx.beginPath();
-          ctx.moveTo(x - 4, y); ctx.lineTo(x + 4, y); ctx.moveTo(x, y); ctx.lineTo(x, y + 12);
-          ctx.moveTo(x - 3, y + 8); ctx.lineTo(x, y + 12); ctx.lineTo(x + 3, y + 8); ctx.stroke();
-        } else {
-          y = H - padB - 6;                 // no flux: marked on the baseline, never given a value
-          ctx.strokeStyle = m.state === "saturated" ? "#e0603c" : "#6b6048";
-          ctx.beginPath(); ctx.moveTo(x - 3, y - 3); ctx.lineTo(x + 3, y + 3); ctx.moveTo(x + 3, y - 3); ctx.lineTo(x - 3, y + 3); ctx.stroke();
-        }
-        st.hoverPoints.push({ x, y, m });
-      }
+    stTooltip.hidden = true;
+    const ms = s.measurements.filter((m) => m.wavelength_um != null && Number.isFinite(m.wavelength_um));
+    const epochIdx = new Map(s.epochs.map((e, i) => [e.index, i]));
+    const showFlagged = stShowFlagged.checked, showLimits = stShowLimits.checked, showNoflux = stShowNoflux.checked;
+    const hasFlux = (m) => m.flux_mjy != null && Number.isFinite(m.flux_mjy) && m.flux_err_mjy != null && Number.isFinite(m.flux_err_mjy);
+    const kindOf = (m) => (m.state === "valid" || m.state === "valid_flagged") && hasFlux(m) ? m.state
+      : m.state === "below_threshold" && m.upper_limit_mjy != null && Number.isFinite(m.upper_limit_mjy) ? "limit" : "noflux";
+    const visible = ms.filter((m) => {
+      if (!st.selectedEpochs.set.has(m.epoch_index)) return false;
+      const k = kindOf(m);
+      return k === "valid" || (k === "valid_flagged" && showFlagged) || (k === "limit" && showLimits) || (k === "noflux" && showNoflux);
     });
+
+    // --- wavelength axis
+    const padL = 62, padR = 14, padT = 22, nEp = s.epochs.length;
+    const padB = 46 + 4 * nEp;                 // x labels + per-epoch sampling strips
+    const plotW = W - padL - padR, plotH = H - padT - padB;
+    let l0, l1;
+    if (stRangeSelect.value === "observed" && ms.length) {
+      const ls = ms.map((m) => m.wavelength_um);
+      const a = Math.min(...ls), b = Math.max(...ls);
+      const pad = Math.max(0.05, 0.04 * (b - a));
+      l0 = Math.max(0.6, a - pad); l1 = Math.min(5.2, b + pad);
+    } else {
+      [l0, l1] = SPHEREX_RANGE;
+    }
+    const xOf = (l) => padL + ((l - l0) / (l1 - l0)) * plotW;
+
+    // --- flux axis (log is chosen automatically when the plotted dynamic range > 5x)
+    const fluxVals = [];
+    for (const m of visible) {
+      const k = kindOf(m);
+      if (k === "valid" || k === "valid_flagged") fluxVals.push(m.flux_mjy - m.flux_err_mjy, m.flux_mjy + m.flux_err_mjy, m.flux_mjy);
+      else if (k === "limit") fluxVals.push(m.upper_limit_mjy);
+    }
+    const pos = fluxVals.filter((v) => v > 0);
+    const centralPos = visible.filter((m) => (kindOf(m) === "valid" || kindOf(m) === "valid_flagged") && m.flux_mjy > 0).map((m) => m.flux_mjy)
+      .concat(visible.filter((m) => kindOf(m) === "limit" && m.upper_limit_mjy > 0).map((m) => m.upper_limit_mjy));
+    const dynRange = centralPos.length ? Math.max(...centralPos) / Math.min(...centralPos) : 1;
+    const useLog = stScaleSelect.value === "log" ? true : stScaleSelect.value === "linear" ? false : dynRange > 5;
+    let yMin, yMax;
+    if (useLog) {
+      const lo = pos.length ? Math.min(...pos) : 0.1, hi = pos.length ? Math.max(...pos) : 10;
+      yMin = lo / 1.4; yMax = hi * 1.4;
+    } else {
+      const lo = fluxVals.length ? Math.min(...fluxVals) : 0, hi = fluxVals.length ? Math.max(...fluxVals) : 1;
+      const span = hi - lo || Math.abs(hi) || 1;
+      yMin = Math.min(0, lo - 0.08 * span); yMax = hi + 0.08 * span;
+    }
+    const yOf = (f) => useLog
+      ? padT + (1 - (Math.log10(Math.min(Math.max(f, yMin), yMax)) - Math.log10(yMin)) / (Math.log10(yMax) - Math.log10(yMin))) * plotH
+      : padT + (1 - (Math.min(Math.max(f, yMin), yMax) - yMin) / (yMax - yMin)) * plotH;
+
+    // --- detector band shading and labels
+    const present = new Set(ms.map((m) => m.detector));
+    const failed = (stData() && stData().retrieval_failed_by_detector) || {};
+    SPHEREX_BANDS.forEach(([det, a, b], k) => {
+      const xa = Math.max(xOf(a), padL), xb = Math.min(xOf(b), padL + plotW);
+      if (xb <= xa) return;
+      if (present.has(det)) {
+        ctx.fillStyle = k % 2 ? "rgba(125,107,69,0.07)" : "rgba(125,107,69,0.035)";
+      } else {
+        ctx.fillStyle = "rgba(125,107,69,0.025)";
+      }
+      ctx.fillRect(xa, padT, xb - xa, plotH);
+      if (!present.has(det)) {                          // hatched: not observed in this search
+        ctx.save(); ctx.beginPath(); ctx.rect(xa, padT, xb - xa, plotH); ctx.clip();
+        ctx.strokeStyle = "rgba(125,107,69,0.12)"; ctx.lineWidth = 1;
+        for (let x = xa - plotH; x < xb; x += 10) { ctx.beginPath(); ctx.moveTo(x, padT + plotH); ctx.lineTo(x + plotH, padT); ctx.stroke(); }
+        ctx.restore();
+      }
+      ctx.strokeStyle = "rgba(125,107,69,0.35)"; ctx.setLineDash([2, 3]);
+      for (const xb2 of [xOf(a), xOf(b)]) if (xb2 > padL && xb2 < padL + plotW) { ctx.beginPath(); ctx.moveTo(xb2, padT); ctx.lineTo(xb2, padT + plotH); ctx.stroke(); }
+      ctx.setLineDash([]);
+      const n = ms.filter((m) => m.detector === det).length;
+      const lbl = present.has(det) ? `${DET_MARKER_TEXT[DET_MARKERS[det]]} ${det} · ${n}` : `${det} · ${failed[det] ? "retrieval failed" : "not in this search"}`;
+      ctx.fillStyle = present.has(det) ? "#e6d2a4" : "#6b6048";
+      const tw = ctx.measureText(lbl).width;
+      if (tw < xb - xa - 4) ctx.fillText(lbl, (xa + xb) / 2 - tw / 2, padT - 7);
+      else if (xb - xa > 18) { const t2 = det; ctx.fillText(t2, (xa + xb) / 2 - ctx.measureText(t2).width / 2, padT - 7); }
+    });
+    ctx.strokeStyle = "rgba(125,107,69,0.5)";
+    ctx.strokeRect(padL, padT, plotW, plotH);
+
+    // --- axes, ticks
+    ctx.fillStyle = "#8f8160";
+    const yt = useLog ? logTicks(yMin, yMax) : niceLinearTicks(yMin, yMax, 5);
+    for (const v of yt) {
+      const y = yOf(v);
+      ctx.strokeStyle = "rgba(125,107,69,0.12)"; ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(padL + plotW, y); ctx.stroke();
+      const t = tickText(v, yt); ctx.fillText(t, padL - 6 - ctx.measureText(t).width, y + 4);
+    }
+    const xt = niceLinearTicks(l0, l1, Math.max(4, Math.floor(plotW / 80)));
+    for (const v of xt) {
+      const x = xOf(v);
+      ctx.strokeStyle = "rgba(125,107,69,0.5)"; ctx.beginPath(); ctx.moveTo(x, padT + plotH); ctx.lineTo(x, padT + plotH + 4); ctx.stroke();
+      const t = tickText(v, xt); ctx.fillText(t, x - ctx.measureText(t).width / 2, padT + plotH + 15);
+    }
+    const xl = "λ (µm), each point at its own measured wavelength";
+    ctx.fillText(xl, padL + plotW / 2 - ctx.measureText(xl).width / 2, H - 4);
+    ctx.save(); ctx.translate(14, padT + plotH / 2 + 40); ctx.rotate(-Math.PI / 2);
+    ctx.fillText(`F_ν (mJy${useLog ? ", log" : ", linear"})`, 0, 0); ctx.restore();
+
+    // --- per-epoch sampling strips (what was actually observed, by bandwidth)
+    s.epochs.forEach((e, i) => {
+      if (!st.selectedEpochs.set.has(e.index)) return;
+      ctx.fillStyle = EPOCH_COLORS[i % EPOCH_COLORS.length];
+      ctx.globalAlpha = 0.6;
+      for (const m of ms) {
+        if (m.epoch_index !== e.index) continue;
+        const bw = m.bandwidth_um != null && Number.isFinite(m.bandwidth_um) ? m.bandwidth_um : 0.02;
+        const xa = Math.max(padL, xOf(m.wavelength_um - bw / 2)), xb = Math.min(padL + plotW, xOf(m.wavelength_um + bw / 2));
+        if (xb > xa) ctx.fillRect(xa, padT + plotH + 21 + 4 * i, Math.max(1, xb - xa), 3);
+      }
+      ctx.globalAlpha = 1;
+    });
+
+    // --- optional model guide: the per-detector shared-shape fit a_e * S(lambda)
+    let modelDrawn = 0;
+    if (stShowModel.checked) {
+      for (const det of s.detectors) {
+        const fit = s.fits && s.fits[det];
+        if (!fit || !fit.knots_um || fit.knots_um.length < 2) continue;
+        fit.epochs.forEach((ei, j) => {
+          if (!st.selectedEpochs.set.has(ei)) return;
+          const a = fit.amplitudes_mjy[j];
+          if (!Number.isFinite(a)) return;
+          const col = EPOCH_COLORS[(epochIdx.get(ei) || 0) % EPOCH_COLORS.length];
+          ctx.strokeStyle = col; ctx.globalAlpha = fit.model_adequate ? 0.55 : 0.3; ctx.lineWidth = 1.2; ctx.setLineDash([5, 4]);
+          ctx.beginPath();
+          let started = false;
+          fit.knots_um.forEach((k, q) => {
+            const f = a * fit.shape[q];
+            if (useLog && !(f > 0)) { started = false; return; }
+            const x = xOf(k), y = yOf(f);
+            started ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+            started = true;
+          });
+          ctx.stroke();
+          ctx.setLineDash([]); ctx.globalAlpha = 1; ctx.lineWidth = 1;
+          modelDrawn++;
+        });
+      }
+    }
+
+    // --- the measurements themselves (drawn last, so they stay on top)
+    let hiddenNonPos = 0;
+    const order = visible.slice().sort((a, b) => (kindOf(a) === "valid") - (kindOf(b) === "valid"));
+    for (const m of order) {
+      const i = epochIdx.has(m.epoch_index) ? epochIdx.get(m.epoch_index) : 0;
+      const col = EPOCH_COLORS[i % EPOCH_COLORS.length];
+      const shape = DET_MARKERS[m.detector] || "circle";
+      const x = xOf(m.wavelength_um);
+      if (x < padL - 1 || x > padL + plotW + 1) continue;
+      const k = kindOf(m);
+      let y;
+      if (k === "valid" || k === "valid_flagged") {
+        if (useLog && !(m.flux_mjy > 0)) { hiddenNonPos++; continue; }
+        y = yOf(m.flux_mjy);
+        ctx.strokeStyle = col; ctx.lineWidth = 1;
+        if (k === "valid_flagged") ctx.setLineDash([2, 2]);
+        ctx.beginPath(); ctx.moveTo(x, yOf(m.flux_mjy - m.flux_err_mjy)); ctx.lineTo(x, yOf(m.flux_mjy + m.flux_err_mjy)); ctx.stroke();
+        ctx.setLineDash([]);
+        markerPath(ctx, shape, x, y, 3.3);
+        if (k === "valid") { ctx.fillStyle = col; ctx.fill(); ctx.strokeStyle = "rgba(0,0,0,0.55)"; ctx.stroke(); }
+        else { ctx.fillStyle = "#000"; ctx.fill(); ctx.strokeStyle = col; ctx.lineWidth = 1.5; ctx.stroke(); ctx.lineWidth = 1; }
+      } else if (k === "limit") {
+        if (useLog && !(m.upper_limit_mjy > 0)) { hiddenNonPos++; continue; }
+        y = yOf(m.upper_limit_mjy);
+        ctx.strokeStyle = col; ctx.lineWidth = 1.2; ctx.beginPath();
+        ctx.moveTo(x - 4, y); ctx.lineTo(x + 4, y); ctx.moveTo(x, y); ctx.lineTo(x, y + 12);
+        ctx.moveTo(x - 3, y + 8); ctx.lineTo(x, y + 12); ctx.lineTo(x + 3, y + 8); ctx.stroke();
+        ctx.lineWidth = 1;
+      } else {
+        y = padT + plotH - 6;               // no flux: marked on the baseline, never given a value
+        ctx.strokeStyle = m.state === "saturated" ? "#e0603c" : "#6b6048";
+        ctx.beginPath(); ctx.moveTo(x - 3, y - 3); ctx.lineTo(x + 3, y + 3); ctx.moveTo(x + 3, y - 3); ctx.lineTo(x - 3, y + 3); ctx.stroke();
+      }
+      st.hoverPoints.push({ x, y, m });
+    }
+    if (!visible.length) {
+      ctx.fillStyle = "#8f8160";
+      ctx.fillText("Nothing to show with the current epoch and quality selection.", padL + 10, padT + plotH / 2);
+    }
+
+    // --- caption: what a point is, and what is missing
+    const counts = { valid: 0, valid_flagged: 0, limit: 0, noflux: 0 };
+    for (const m of visible) counts[kindOf(m)]++;
+    const allCounts = { valid: 0, valid_flagged: 0, limit: 0, noflux: 0 };
+    for (const m of ms) if (st.selectedEpochs.set.has(m.epoch_index)) allCounts[kindOf(m)]++;
+    const missing = SPHEREX_BANDS.map((b) => b[0]).filter((d) => !present.has(d));
+    const spans = s.epochs.map((e, i) => `E${i + 1} ${(e.mjd_max - e.mjd_min).toFixed(1)} d`).join(", ");
+    const parts = [
+      `Each point is ONE exposure measured on native pixels at its own wavelength; nothing is coadded, averaged or merged across exposures, epochs or detectors.`,
+      `An epoch is a cluster of exposures taken over a span of time (${spans}), not one instant; colour shows the epoch, not a single time.`,
+      `Shown: ${counts.valid} valid, ${counts.valid_flagged} flagged${showFlagged ? "" : ` (hidden: ${allCounts.valid_flagged})`}, ${counts.limit} upper limits${showLimits ? "" : ` (hidden: ${allCounts.limit})`}, ${counts.noflux} without flux${showNoflux ? "" : ` (hidden: ${allCounts.noflux})`}.`,
+      `Detectors with data: ${[...present].sort().join(", ") || "none"}.` +
+        (missing.length ? ` No exposures in this search for ${missing.join(", ")}: hatched bands are coverage gaps, not zero flux.` : ""),
+      `Flux scale: ${useLog ? "log" : "linear"}${stScaleSelect.value === "auto" ? ` (auto; plotted dynamic range ${dynRange.toFixed(1)}×)` : ""}.` +
+        (hiddenNonPos ? ` ${hiddenNonPos} point(s) with F ≤ 0 cannot be drawn on a log scale (switch to linear).` : ""),
+    ];
+    if (stShowModel.checked) parts.push(modelDrawn
+      ? `Dashed lines: MODEL GUIDE only, each detector's shared-shape fit a_e·S(λ) per epoch (no per-epoch tilt), drawn only over the fitted wavelength range; faint where the model does not describe the source.`
+      : `Model guide: no detector had enough data for the shared-shape fit.`);
+    stSedCaption.textContent = parts.join(" ");
+  }
+
+  function stTooltipHtml(m) {
+    const ep = stSource().epochs.find((e) => e.index === m.epoch_index);
+    const rows = [
+      ["Detector", m.detector],
+      ["Epoch", `${m.epoch_index != null ? m.epoch_index + 1 : "?"}${ep ? ` (${fmtDate(ep.mjd_min)}…${fmtDate(ep.mjd_max)})` : ""}`],
+      ["Time", Number.isFinite(m.time_mjd) ? `MJD ${m.time_mjd.toFixed(4)} (${fmtDate(m.time_mjd)})` : "?"],
+      ["λ", m.wavelength_um != null ? `${m.wavelength_um.toFixed(4)} µm` : "?"],
+      ["Δλ", m.bandwidth_um != null ? `${m.bandwidth_um.toFixed(4)} µm` : "?"],
+    ];
+    if (m.state === "below_threshold" && m.upper_limit_mjy != null) {
+      rows.push(["Flux", `< ${fmtFlux(m.upper_limit_mjy)} mJy (3σ upper limit)`]);
+      if (m.flux_mjy != null) rows.push(["Measured", `${fmtFlux(m.flux_mjy)} ± ${fmtFlux(m.flux_err_mjy)} mJy`]);
+    } else if (m.flux_mjy != null) {
+      rows.push(["Flux", `${fmtFlux(m.flux_mjy)} ± ${fmtFlux(m.flux_err_mjy)} mJy`]);
+    } else {
+      rows.push(["Flux", "none"]);
+    }
+    rows.push(["S/N", m.snr != null && Number.isFinite(m.snr) ? m.snr.toFixed(1) : "—"]);
+    rows.push(["Quality", STATE_TEXT[m.state] || m.state]);
+    rows.push(["Flags", (m.flags_in_aperture || []).join(", ") || "none"]);
+    rows.push(["obs_id", m.obs_id]);
+    const esc = (v) => String(v).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+    return rows.map(([k, v]) => `<div><span class="st-tt-k">${esc(k)}</span> ${esc(v)}</div>`).join("");
   }
 
   stSedCanvas.addEventListener("mousemove", (ev) => {
     const r = stSedCanvas.getBoundingClientRect();
-    const x = ((ev.clientX - r.left) / r.width) * stSedCanvas.width, y = ((ev.clientY - r.top) / r.height) * stSedCanvas.height;
-    let best = null, bd = 10;
+    const sx = stSedCanvas.width / r.width, sy = stSedCanvas.height / r.height;
+    const x = (ev.clientX - r.left) * sx, y = (ev.clientY - r.top) * sy;
+    let best = null, bd = 9 * sx;
     for (const p of st.hoverPoints) {
       const dd = Math.hypot(p.x - x, p.y - y);
       if (dd < bd) { bd = dd; best = p; }
     }
-    stHover.textContent = best ? describeMeasurement(best.m) : "Hover a point to see its measurement.";
+    if (!best) {
+      stTooltip.hidden = true;
+      stHover.textContent = "Hover a point to see its measurement.";
+      return;
+    }
+    stHover.textContent = describeMeasurement(best.m);
+    stTooltip.innerHTML = stTooltipHtml(best.m);
+    stTooltip.hidden = false;
+    const wrap = stSedCanvas.parentElement.getBoundingClientRect();
+    const px = best.x / sx + (r.left - wrap.left), py = best.y / sy + (r.top - wrap.top);
+    const tw = stTooltip.offsetWidth, th = stTooltip.offsetHeight;
+    stTooltip.style.left = `${px + 12 + tw > wrap.width ? Math.max(0, px - 12 - tw) : px + 12}px`;
+    stTooltip.style.top = `${Math.max(0, Math.min(py - th / 2, wrap.height - th))}px`;
   });
+  stSedCanvas.addEventListener("mouseleave", () => { stTooltip.hidden = true; });
+  for (const c of [stRangeSelect, stScaleSelect, stShowFlagged, stShowLimits, stShowNoflux, stShowModel]) {
+    c.addEventListener("change", () => { const s = stSource(); if (s) drawSed(s); });
+  }
 
   function describeMeasurement(m) {
     const f = m.flux_mjy == null ? "no flux"
@@ -2222,6 +2600,362 @@
   stSourceSelect.addEventListener("change", renderStSource);
 
   // ---------------------------------------------------------------------
+  // False-colour IR composite (RGB). Built client-side from the per-detector
+  // frames already resampled onto ONE common grid (resample.py), so pixel i
+  // is the same sky position in every channel. Rules:
+  //  * channels come from ONE observation epoch by default (frames whose mean
+  //    times lie within RGB_EPOCH_GAP_DAYS; dichroic pairs D1/D4, D2/D5, D3/D6
+  //    are simultaneous), because variability between epochs would otherwise
+  //    show up as colour;
+  //  * shortest wavelength -> blue, longest -> red (2 bands: G = 50/50 blend);
+  //  * a pixel with no data or a display-interpolated value in ANY channel is
+  //    drawn grey-hatched, never as zero flux in that channel;
+  //  * default stretch is the colour-preserving asinh of Lupton et al. (2004).
+  // ---------------------------------------------------------------------
+  const rgbControls = $("rgb-controls");
+  const rgbLegend = $("rgb-legend");
+  const rgbEpochSelect = $("rgb-epoch-select");
+  const rgbPrevBtn = $("rgb-prev");
+  const rgbNextBtn = $("rgb-next");
+  const rgbPlayBtn = $("rgb-play");
+  const rgbStretchMode = $("rgb-stretch-mode");
+  const rgbSoftSlider = $("rgb-soft-slider");
+  const rgbBlackSlider = $("rgb-black-slider");
+  const rgbWhiteSlider = $("rgb-white-slider");
+  const rgbSoftValue = $("rgb-soft-value");
+  const rgbBlackValue = $("rgb-black-value");
+  const rgbWhiteValue = $("rgb-white-value");
+  const rgbManual = { R: $("rgb-r-select"), G: $("rgb-g-select"), B: $("rgb-b-select") };
+  const RGB_EPOCH_GAP_DAYS = 45;            // same gap as the backend's epoch clustering
+  const RGB_SIMULTANEOUS_DAYS = 1;
+  const SAT_FLAG_NAMES = ["OVERFLOW", "BLOOM", "NONLINEAR"];   // = pipeline.SATURATION_FLAG_NAMES (SUR_ERROR is mostly on empty sky)
+  const rgb = { epochIndex: 0, signature: "", timer: null, overlayFrameIdx: null };
+
+  const rgbSoftening = () => Math.pow(10, -0.5 + (3 * parseFloat(rgbSoftSlider.value)) / 100);   // 0.3 .. 300 sigma
+  const rgbBlack = () => parseFloat(rgbBlackSlider.value);                                        // sigma
+  const rgbWhite = () => parseFloat(rgbWhiteSlider.value);                                        // percentile of intensity
+  const frameKey = (f) => `${f.detectors[0]}@${f.timeMjdMean.toFixed(5)}`;
+  const frameText = (f, g) => `${f.detectors[0]} ${f.centralWavelengthUm.toFixed(2)} µm · epoch ${g != null ? g + 1 : "?"} · MJD ${f.timeMjdMean.toFixed(2)}`;
+
+  /** Single-detector frames on the common grid, with a known wavelength. */
+  function rgbFrames() {
+    const all = (state.allFrames || []).filter((f) => f.detectors && f.detectors.length === 1 && f.centralWavelengthUm != null);
+    if (!all.length) return [];
+    const w = all[0].width, h = all[0].height;
+    return all.filter((f) => f.width === w && f.height === h);
+  }
+
+  function rgbEpochGroups(frames) {
+    const sorted = frames.slice().sort((a, b) => a.timeMjdMean - b.timeMjdMean);
+    const groups = [];
+    for (const f of sorted) {
+      const g = groups[groups.length - 1];
+      if (g && f.timeMjdMean - g.tMax <= RGB_EPOCH_GAP_DAYS) { g.frames.push(f); g.tMax = f.timeMjdMean; }
+      else groups.push({ frames: [f], tMin: f.timeMjdMean, tMax: f.timeMjdMean });
+    }
+    groups.forEach((g, i) => (g.index = i));
+    return groups;
+  }
+
+  /** One frame per detector, sorted by wavelength; mapping per the band count. */
+  function rgbAutoMapping(group) {
+    const seen = new Set();
+    const uniq = group.frames.slice().sort((a, b) => a.centralWavelengthUm - b.centralWavelengthUm)
+      .filter((f) => !seen.has(f.detectors[0]) && seen.add(f.detectors[0]));
+    if (uniq.length < 2) return { error: `Epoch ${group.index + 1} has only ${uniq.length} wavelength band (${uniq.map((f) => f.detectors[0]).join(", ") || "none"}). A false-colour composite needs at least 2 distinct bands from the same epoch: search with 2 or more detectors (e.g. D3,D6).` };
+    if (uniq.length === 2) return { R: [uniq[1]], G: "blend", B: [uniq[0]], bands: uniq.length };
+    const n = uniq.length, a = Math.round(n / 3), b = Math.round((2 * n) / 3);
+    return { B: uniq.slice(0, a), G: uniq.slice(a, b), R: uniq.slice(b), bands: n };
+  }
+
+  function sortedFinite(arr, mask) {
+    const out = [];
+    for (let i = 0; i < arr.length; i++) if (!mask[i] && Number.isFinite(arr[i])) out.push(arr[i]);
+    return Float32Array.from(out).sort();
+  }
+  function pctl(sorted, p) {
+    if (!sorted.length) return NaN;
+    return sorted[Math.min(sorted.length - 1, Math.max(0, Math.round((p / 100) * (sorted.length - 1))))];
+  }
+  function robustStats(arr, mask) {
+    const s = sortedFinite(arr, mask);
+    const med = pctl(s, 50);
+    const dev = Float32Array.from(s, (v) => Math.abs(v - med)).sort();
+    return { median: med, sigma: 1.4826 * pctl(dev, 50), n: s.length };
+  }
+
+  /** 1 = this grid pixel was built partly from saturated / non-linear native
+   * pixels (OVERFLOW, BLOOM, NONLINEAR) in at least one exposure. */
+  function saturationMask(f) {
+    if (!f.saturationMaskB64) return null;
+    if (f._satMask) return f._satMask;
+    const bytes = base64ToBytes(f.saturationMaskB64);
+    const N = f.width * f.height, out = new Uint8Array(N);
+    for (let i = 0; i < N; i++) out[i] = (bytes[i >> 3] >> (i & 7)) & 1;
+    Object.defineProperty(f, "_satMask", { value: out, enumerable: false });
+    return out;
+  }
+  function base64ToBytes(b64) {
+    const bin = atob(b64), out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+
+  /** Background-subtracted mean of the member frames; marks unusable pixels
+   * in `masked`: 1 = no data or display-interpolated, 2 = saturation-flagged. */
+  function rgbChannel(members, masked) {
+    const N = members[0].width * members[0].height;
+    const out = new Float32Array(N);
+    const diag = [];
+    for (const f of members) {
+      const v = physicalValuesForFrame(f);
+      const fmask = new Uint8Array(N);
+      const sat = saturationMask(f);
+      let nNan = 0, nInterp = 0, nSat = 0;
+      for (let i = 0; i < N; i++) {
+        if (!Number.isFinite(v[i])) { fmask[i] = 1; nNan++; }
+        else if (f.gapFilled && f.gapFilled.has(i)) { fmask[i] = 1; nInterp++; }
+        else if (sat && sat[i]) { fmask[i] = 2; nSat++; }
+      }
+      const bg = robustStats(v, fmask).median;
+      for (let i = 0; i < N; i++) {
+        if (fmask[i]) masked[i] = masked[i] === 1 ? 1 : fmask[i];
+        else out[i] += (v[i] - (Number.isFinite(bg) ? bg : 0)) / members.length;
+      }
+      diag.push({ frame: f, bg, nNan, nInterp, nSat, hasMask: !!sat, sat: SAT_FLAG_NAMES.map((k) => [k, (f.contamination || {})[k] || 0]).filter(([, c]) => c > 0) });
+    }
+    return { values: out, diag };
+  }
+
+  /** Current channel assignment: auto for the selected epoch, with optional manual overrides. */
+  function rgbAssignment(groups) {
+    const group = groups[Math.min(rgb.epochIndex, groups.length - 1)];
+    const auto = rgbAutoMapping(group);
+    const byKey = new Map(rgbFrames().map((f) => [frameKey(f), f]));
+    const manual = {};
+    for (const c of ["R", "G", "B"]) {
+      const v = rgbManual[c].value;
+      if (v === "blend") manual[c] = "blend";
+      else if (v !== "auto" && byKey.has(v)) manual[c] = [byKey.get(v)];
+    }
+    const anyManual = Object.keys(manual).length > 0;
+    if (auto.error && !(manual.R && manual.B)) return { group, error: auto.error };
+    const pick = (c) => manual[c] || (auto.error ? null : auto[c]);
+    const map = { R: pick("R"), G: pick("G") || "blend", B: pick("B") };
+    if (!map.R || !map.B || map.R === "blend" || map.B === "blend") return { group, error: "Red and blue must each be a frame (only green can be a 50/50 blend)." };
+    return { group, map, anyManual, bands: auto.bands };
+  }
+
+  function refreshRgbSelectors(frames, groups) {
+    const sig = frames.map(frameKey).join("|");
+    if (sig === rgb.signature) return;
+    rgb.signature = sig;
+    rgb.epochIndex = Math.min(rgb.epochIndex, Math.max(groups.length - 1, 0));
+    rgbEpochSelect.innerHTML = "";
+    for (const g of groups) {
+      const dets = Array.from(new Set(g.frames.map((f) => f.detectors[0]))).sort();
+      const o = document.createElement("option");
+      o.value = String(g.index);
+      o.textContent = `Epoch ${g.index + 1}: ${fmtDate(g.tMin)}${g.tMax - g.tMin > 0.5 ? `…${fmtDate(g.tMax)}` : ""} (${dets.join("+")})`;
+      rgbEpochSelect.appendChild(o);
+    }
+    rgbEpochSelect.value = String(rgb.epochIndex);
+    const epochOf = (f) => groups.findIndex((g) => g.frames.includes(f));
+    for (const c of ["R", "G", "B"]) {
+      const sel = rgbManual[c], prev = sel.value;
+      sel.innerHTML = "";
+      const add = (v, t) => { const o = document.createElement("option"); o.value = v; o.textContent = t; sel.appendChild(o); };
+      add("auto", "Auto (same epoch, by wavelength)");
+      if (c === "G") add("blend", "50/50 blend of red and blue");
+      frames.slice().sort((a, b) => a.timeMjdMean - b.timeMjdMean || a.centralWavelengthUm - b.centralWavelengthUm)
+        .forEach((f) => add(frameKey(f), frameText(f, epochOf(f))));
+      sel.value = Array.from(sel.options).some((o) => o.value === prev) ? prev : "auto";
+    }
+  }
+
+  function renderRgbView() {
+    const frames = rgbFrames();
+    const groups = rgbEpochGroups(frames);
+    refreshRgbSelectors(frames, groups);
+    rgbSoftValue.textContent = `${rgbSoftening().toFixed(rgbSoftening() < 10 ? 1 : 0)}σ`;
+    rgbBlackValue.textContent = `${rgbBlack().toFixed(1)}σ`;
+    rgbWhiteValue.textContent = `${rgbWhite().toFixed(1)}%`;
+    rgbLegend.innerHTML = "";
+    rgbLegend.hidden = false;
+    const fail = (msg) => {
+      canvasCtx.clearRect(0, 0, canvas.width, canvas.height);
+      state.lastRenderedGrid = null;
+      drawOverlay();
+      rgbLegend.appendChild(el("p", msg, "rgb-warning"));
+      frameLabel.textContent = "False-colour IR composite unavailable.";
+    };
+    if ((state.allFrames || []).some((f) => f.detectors && f.detectors.length > 1)) {
+      fail("These frames stack several detectors (wavelengths) together. A false-colour composite needs per-detector frames: choose “per detector, per epoch” grouping and search again.");
+      return;
+    }
+    if (groups.length === 0) { fail("No frames with a known wavelength are loaded."); return; }
+    const asg = rgbAssignment(groups);
+    if (asg.error) { fail(asg.error); return; }
+
+    const { map } = asg;
+    const ref = map.R[0];
+    const W = ref.width, H = ref.height, N = W * H;
+    const masked = new Uint8Array(N);
+    const chR = rgbChannel(map.R, masked), chB = rgbChannel(map.B, masked);
+    const chG = map.G === "blend" ? null : rgbChannel(map.G, masked);
+    let r = chR.values, b = chB.values;
+    let g = chG ? chG.values : Float32Array.from(r, (v, i) => 0.5 * (v + b[i]));
+    const perChannel = rgbStretchMode.value === "per_channel";
+    const scales = {};
+    if (perChannel) {
+      const norm = (arr, name) => {
+        const s = pctl(sortedFinite(arr, masked), 99.5);
+        const k = s > 0 ? s : 1;
+        scales[name] = k;
+        return Float32Array.from(arr, (v) => v / k);
+      };
+      r = norm(r, "R"); b = norm(b, "B"); g = chG ? norm(g, "G") : Float32Array.from(r, (v, i) => 0.5 * (v + b[i]));
+    }
+
+    // Lupton et al. (2004): one intensity I = (r+g+b)/3 drives the stretch,
+    // every channel is multiplied by the SAME factor asinh(I'/beta)/I, and a
+    // pixel whose largest channel exceeds 1 is scaled down as a whole, so
+    // R:G:B ratios survive in bright cores instead of saturating to white.
+    const I = new Float32Array(N);
+    for (let i = 0; i < N; i++) I[i] = (Math.max(r[i], 0) + Math.max(g[i], 0) + Math.max(b[i], 0)) / 3;
+    const st0 = robustStats(Float32Array.from(r, (v, i) => (v + g[i] + b[i]) / 3), masked);
+    const sigma = st0.sigma > 0 ? st0.sigma : 1e-6;
+    const beta = rgbSoftening() * sigma, bp = rgbBlack() * sigma;
+    const Ip = Float32Array.from(I, (v) => v - bp);
+    const Iw = Math.max(pctl(sortedFinite(Ip, masked), rgbWhite()), beta * 1e-3);
+    const normK = 1 / Math.asinh(Iw / beta);
+    // A channel significantly BELOW the sky (< -3 sigma of that channel) is
+    // not a colour: next to bright stars it is the negative lobe of the
+    // Lanczos-3 resampling kernel. Clipping it to 0 would paint the pixel in
+    // the pure colour of the other channel, so such pixels are drawn
+    // neutral (grey at their intensity) and counted.
+    const negLimit = [r, g, b].map((arr) => -3 * (robustStats(arr, masked).sigma || 0));
+    const rgba = new Uint8ClampedArray(N * 4);
+    let nMasked = 0, nNeutral = 0, nSatMasked = 0;
+    for (let i = 0; i < N; i++) {
+      const ay = Math.floor(i / W), ax = i - ay * W;
+      const o = ((H - 1 - ay) * W + ax) * 4;
+      if (masked[i]) {
+        // neutral checker; saturation-flagged pixels lighter, with a cross-hatch drawn on top
+        const c = masked[i] === 2 ? ((ax + ay) % 2 ? 150 : 175) : ((ax + ay) % 2 ? 92 : 118);
+        rgba[o] = c; rgba[o + 1] = c; rgba[o + 2] = c; rgba[o + 3] = 255;
+        if (masked[i] === 2) nSatMasked++; else nMasked++;
+        continue;
+      }
+      let R = 0, G = 0, B = 0;
+      if ((r[i] < negLimit[0] || g[i] < negLimit[1] || b[i] < negLimit[2]) && Math.max(r[i], g[i], b[i]) > 0) {
+        const v = Ip[i] > 0 ? Math.min(1, Math.asinh(Ip[i] / beta) * normK) : 0;
+        const q = Math.round(255 * v);
+        rgba[o] = q; rgba[o + 1] = q; rgba[o + 2] = q; rgba[o + 3] = 255;
+        nNeutral++;
+        continue;
+      }
+      if (Ip[i] > 0 && I[i] > 0) {
+        const k = (Math.asinh(Ip[i] / beta) * normK) / I[i];
+        R = Math.max(r[i], 0) * k; G = Math.max(g[i], 0) * k; B = Math.max(b[i], 0) * k;
+        const m = Math.max(R, G, B);
+        if (m > 1) { R /= m; G /= m; B /= m; }
+      }
+      rgba[o] = Math.round(255 * R); rgba[o + 1] = Math.round(255 * G); rgba[o + 2] = Math.round(255 * B); rgba[o + 3] = 255;
+    }
+
+    // overlays: the detections of the selected detector series in THIS epoch
+    const g0 = asg.group;
+    rgb.overlayFrameIdx = null;
+    state.frames.forEach((f, k) => {
+      if (f.timeMjdMean >= g0.tMin - RGB_SIMULTANEOUS_DAYS && f.timeMjdMean <= g0.tMax + RGB_SIMULTANEOUS_DAYS) rgb.overlayFrameIdx = k;
+    });
+
+    const chans = [["R", "Red", map.R, chR], ["G", "Green", map.G, chG], ["B", "Blue", map.B, chB]];
+    state.lastRenderedGrid = {
+      width: W, height: H, values: r, frame: map.R[0], wcsFrame: map.R[0],
+      rgb: { channels: chans.map(([c, , m, ch]) => ({ c, label: m === "blend" ? "50/50 blend" : m.map((f) => f.detectors[0]).join("+"), values: ch ? ch.values : null })), masked },
+    };
+    if (canvas.width !== W) canvas.width = W;
+    if (canvas.height !== H) canvas.height = H;
+    canvasCtx.putImageData(new ImageData(rgba, W, H), 0, 0);
+    layoutCanvas();   // also redraws the overlay: crosshair, markers, hatching of unusable pixels
+
+    // ---- legend: exact mapping, stretch, warnings
+    const desc = (m) => m === "blend" ? "50/50 blend of the red and blue inputs"
+      : m.map((f) => `${f.centralWavelengthUm.toFixed(2)} µm (${f.detectors[0]}, MJD ${f.timeMjdMean.toFixed(2)})`).join(" + ") + (m.length > 1 ? ", averaged" : "");
+    const mapLine = el("p", null, "rgb-map");
+    [["Red", "#ff6b6b", map.R], ["Green", "#7CFC9A", map.G], ["Blue", "#5fb0ff", map.B]].forEach(([n, col, m], k) => {
+      const sp = el("span", `${n}: ${desc(m)}`);
+      sp.style.color = col;
+      mapLine.appendChild(sp);
+      if (k < 2) mapLine.appendChild(document.createTextNode("  ·  "));
+    });
+    rgbLegend.appendChild(mapLine);
+    rgbLegend.appendChild(el("p", "False-colour representation of near-infrared wavelengths (not human-visible colour). Bluer = relatively brighter at the shorter wavelength.", "rgb-note"));
+    rgbLegend.appendChild(el("p", "The PSF is larger at longer wavelengths and the images are not PSF-matched, so stars show redder halos and bluer cores; read colours from the core of a source, and treat coloured rings around bright stars as optics and resampling, not as structure.", "status-text"));
+    rgbLegend.appendChild(el("p", perChannel
+      ? `Per-channel normalised asinh: each channel is first divided by its own 99.5th percentile (${Object.entries(scales).map(([k, v]) => `${k} ${v.toPrecision(3)} MJy/sr`).join(", ")}). This enhances contrast; colours do NOT show true flux ratios between wavelengths.`
+      : `Colour-preserving asinh (Lupton et al. 2004) on background-subtracted surface brightness (MJy/sr): R:G:B ratios follow the measured ratios between wavelengths. Softening β = ${rgbSoftening().toFixed(1)}σ, black point ${rgbBlack().toFixed(1)}σ, white at the ${rgbWhite().toFixed(1)}th percentile of intensity (σ = ${sigma.toPrecision(2)} MJy/sr, the sky noise of the mean channel).`,
+      "status-text"));
+    const warnings = [];
+    const used = chans.filter(([, , m]) => m !== "blend").flatMap(([, , m]) => m);
+    const ts = used.map((f) => f.timeMjdMean);
+    const spread = Math.max(...ts) - Math.min(...ts);
+    const epochsUsed = new Set(used.map((f) => groups.findIndex((gg) => gg.frames.includes(f))));
+    if (epochsUsed.size > 1) warnings.push(`CROSS-EPOCH: the channels come from different epochs (${spread.toFixed(0)} days apart). Any brightness change between those dates appears as a colour difference; this is not a single-time colour image.`);
+    else if (spread > RGB_SIMULTANEOUS_DAYS) warnings.push(`The channels were observed ${spread.toFixed(1)} days apart within one epoch, so they are not simultaneous; a source varying on that timescale can change colour.`);
+    if (asg.anyManual) warnings.push("Manual channel selection is active.");
+    if (nNeutral) warnings.push(`${nNeutral} pixel(s) are drawn without colour (neutral grey): one channel is significantly below the sky there (< −3σ), typically the negative ringing lobe of the resampling kernel beside a bright star. They have no meaningful colour (not blue or red).`);
+    if (nSatMasked) warnings.push(`${nSatMasked} pixel(s) are cross-hatched (light grey, ✕): at least one channel there is built from saturated or non-linear data (OVERFLOW, BLOOM or NONLINEAR in at least one exposure). Their colour would be wrong, so none is shown.`);
+    if (nMasked) warnings.push(`${nMasked} pixel(s) are grey-hatched (dark grey, /): at least one channel has no data there (blank pixel) or only a value interpolated for display (typically a saturated or flagged core). They are not drawn as zero flux in that channel.`);
+    for (const [, n, m, ch] of chans) {
+      if (!ch) continue;
+      for (const d of ch.diag) {
+        const det = d.frame.detectors[0];
+        if (d.nInterp) warnings.push(`${n} (${det}): ${d.nInterp} pixel(s) interpolated for display at a bright core: saturated or flagged data, masked in the composite.`);
+        if (d.sat.length && !d.hasMask) warnings.push(`${n} (${det}): the input exposures carry ${d.sat.map(([k, c]) => `${k} ${c}`).join(", ")} flagged pixel(s), but this frame has no per-pixel saturation mask (cached before it existed: clear the cache and search again), so the brightest stars' colours may be unreliable even where not hatched.`);
+        else if (d.nSat) warnings.push(`${n} (${det}): ${d.nSat} grid pixel(s) flagged for saturation or non-linearity (native flags: ${d.sat.map(([k, c]) => `${k} ${c}`).join(", ")}).`);
+      }
+    }
+    if (warnings.length) {
+      const box = el("div", null, "rgb-warning");
+      box.appendChild(el("strong", "⚠ Check before interpreting colours"));
+      const ul = el("ul");
+      warnings.forEach((w) => ul.appendChild(el("li", w)));
+      box.appendChild(ul);
+      rgbLegend.appendChild(box);
+    }
+    const seriesNote = currentSeriesAnalysis() ? ` Circles: tracked sources of the ${detectorViewSelect.value} series in this epoch.` : "";
+    frameLabel.textContent =
+      `False-colour IR composite, epoch ${g0.index + 1}/${groups.length}: ${fmtDate(g0.tMin)}${g0.tMax - g0.tMin > 0.5 ? `…${fmtDate(g0.tMax)}` : ""}\n` +
+      `${asg.bands || "?"} band(s) this epoch; ${perChannel ? "per-channel normalised" : "colour-preserving"} asinh.${seriesNote}`;
+  }
+
+  function rgbStep(d) {
+    const groups = rgbEpochGroups(rgbFrames());
+    if (!groups.length) return;
+    rgb.epochIndex = (rgb.epochIndex + d + groups.length) % groups.length;
+    rgbEpochSelect.value = String(rgb.epochIndex);
+    renderView();
+  }
+  function stopRgbPlay() {
+    if (rgb.timer) { clearInterval(rgb.timer); rgb.timer = null; }
+    rgbPlayBtn.textContent = "▶ Blink epochs";
+  }
+  rgbPlayBtn.addEventListener("click", () => {
+    if (rgb.timer) { stopRgbPlay(); return; }
+    rgbPlayBtn.textContent = "⏸ Stop";
+    const speed = parseInt(speedSlider.value, 10);
+    rgb.timer = setInterval(() => rgbStep(1), Math.max(300, 1500 - speed * 110));
+  });
+  rgbPrevBtn.addEventListener("click", () => { stopRgbPlay(); rgbStep(-1); });
+  rgbNextBtn.addEventListener("click", () => { stopRgbPlay(); rgbStep(1); });
+  rgbEpochSelect.addEventListener("change", () => { stopRgbPlay(); rgb.epochIndex = parseInt(rgbEpochSelect.value, 10) || 0; renderView(); });
+  [rgbStretchMode, rgbManual.R, rgbManual.G, rgbManual.B].forEach((c) => c.addEventListener("change", renderView));
+  [rgbSoftSlider, rgbBlackSlider, rgbWhiteSlider].forEach((c) => c.addEventListener("input", renderView));
+
+  // ---------------------------------------------------------------------
   // Playback
   // ---------------------------------------------------------------------
   function stopPlayback() {
@@ -2309,7 +3043,11 @@
   viewModeSelect.addEventListener("change", () => {
     const isDiff = viewModeSelect.value === "difference";
     const isBlink = viewModeSelect.value === "blink";
+    const isRgb = viewModeSelect.value === "rgb";
     abPick.hidden = !isDiff;
+    rgbControls.hidden = !isRgb;
+    rgbLegend.hidden = !isRgb;
+    if (!isRgb) stopRgbPlay();
     setPlaybackControlsEnabled(isBlink);
     if (!isBlink) stopPlayback();
     renderView();
@@ -2319,6 +3057,12 @@
 
   document.addEventListener("keydown", (ev) => {
     if (document.activeElement === positionInput) return;
+    if (viewModeSelect.value === "rgb" && (ev.key === "ArrowRight" || ev.key === "ArrowLeft")) {
+      ev.preventDefault();
+      stopRgbPlay();
+      rgbStep(ev.key === "ArrowRight" ? 1 : -1);
+      return;
+    }
     if (ev.key === " ") {
       ev.preventDefault();
       state.playing ? stopPlayback() : startPlayback();

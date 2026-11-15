@@ -8,6 +8,7 @@ download); every processing step is the production code in app/stream.py.
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -50,17 +51,44 @@ def resolved_from_manifest(manifest: dict) -> ResolvedPosition:
     )
 
 
+def cached_cone(target: str, table: str, ra: float, dec: float, radius_deg: float, root: Path = REAL_DATA_DIR) -> str:
+    """Cone search against the cached catalogue rows (CSV text, same format as IRSA /SCS)."""
+    import io
+    from astropy.table import Table
+    from .catalogs import CatalogError
+
+    path = root / target / "catalogs" / f"{table}.csv"
+    if not path.exists():
+        raise CatalogError(f"no cached {table} rows for {target} (run scripts/cache_catalogs.py)")
+    meta = json.loads(path.with_suffix(".json").read_text())
+    cra, cdec = meta["centre_deg"]
+    if math.hypot((ra - cra) * math.cos(math.radians(dec)), dec - cdec) + radius_deg > meta["radius_deg"] + 1e-6:
+        raise CatalogError(f"requested cone exceeds the cached {table} cone for {target}")
+    t = Table.read(path, format="ascii.csv")
+    rc, dc = ("ra", "dec") if "ra" in t.colnames else ("ra_pm", "dec_pm")
+    if len(t):
+        sep = np.hypot((np.array(t[rc], float) - ra) * math.cos(math.radians(dec)), np.array(t[dc], float) - dec)
+        t = t[sep <= radius_deg]
+    buf = io.StringIO()
+    t.write(buf, format="ascii.csv")
+    return buf.getvalue()
+
+
 def run_cached(
     target: str,
     mode: str = "detector_epoch",
     detectors: Optional[list[str]] = None,
     analyze: bool = True,
     root: Path = REAL_DATA_DIR,
-    use_catalogs: bool = False,
+    use_catalogs=False,
     shiftstack: bool = False,
     spectrotemporal: bool = False,
+    cutout_transform=None,
 ) -> CachedRun:
-    """`use_catalogs=False` (the default, for offline tests) skips the Gaia /
+    """`use_catalogs`: False (default) = catalogues unavailable; "cached" = the
+    REAL catalogue rows cached next to the cutouts (scripts/cache_catalogs.py),
+    no network; True = live IRSA queries.
+    `use_catalogs=False` (the default, for offline tests) skips the Gaia /
     CatWISE queries: every track then reports catalog_unavailable."""
     manifest = load_manifest(target, root)
     resolved = resolved_from_manifest(manifest)
@@ -77,26 +105,37 @@ def run_cached(
         for rec in recs:
             with fits.open(by_obs[id(rec)], memmap=False) as hdul:
                 loaded = fits.HDUList([h.copy() for h in hdul])
-            yield Cutout(record=rec, hdul=loaded)
+            c = Cutout(record=rec, hdul=loaded)
+            # validation only (app/injection.py): modifies the in-memory copy, never the cached file
+            yield cutout_transform(c) if cutout_transform is not None else c
 
     run = CachedRun(manifest=manifest, resolved=resolved)
     import app.stream as stream_mod
 
+    import app.catalogs as catalogs_mod
+
     saved = (stream_mod.gaia_sources, stream_mod.catwise_sources)
-    if not use_catalogs:
+    saved_override = catalogs_mod.CONE_OVERRIDE
+    if use_catalogs == "cached":
+        catalogs_mod.CONE_OVERRIDE = lambda table, ra, dec, radius: cached_cone(target, table, ra, dec, radius, root)
+    elif not use_catalogs:
         def _unavailable(*a, **k):
             raise stream_mod.CatalogError("catalogue queries disabled for offline run")
         stream_mod.gaia_sources = stream_mod.catwise_sources = _unavailable
+    from .localdata import no_fallback
+
     try:
-        for item in stream_frames(resolved, manifest["fov_arcmin"], detectors, mode, analyze=analyze,
-                                  records_override=records, cutout_source=source, exposure_sink=run.exposures,
-                                  shiftstack=shiftstack, spectrotemporal=spectrotemporal):
-            if isinstance(item, dict):
-                run.analysis = item
-            elif isinstance(item, EncodedFrame):
-                run.frames.append(item.metadata)
+        with no_fallback():
+            for item in stream_frames(resolved, manifest["fov_arcmin"], detectors, mode, analyze=analyze,
+                                      records_override=records, cutout_source=source, exposure_sink=run.exposures,
+                                      shiftstack=shiftstack, spectrotemporal=spectrotemporal):
+                if isinstance(item, dict):
+                    run.analysis = item
+                elif isinstance(item, EncodedFrame):
+                    run.frames.append(item.metadata)
     finally:
         stream_mod.gaia_sources, stream_mod.catwise_sources = saved
+        catalogs_mod.CONE_OVERRIDE = saved_override
     run.frames.sort(key=lambda m: ("+".join(m["detectors"]), m["time_mjd_mean"]))
     if run.analysis and "spectrotemporal" in run.analysis:
         # Exposures that could not be downloaded when the cache was built.

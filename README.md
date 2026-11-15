@@ -28,6 +28,15 @@
 > exposure's own wavelength and time, with spectra by epoch, light curves per detector and
 > separate change statistics. See [docs/PHASE3.md](docs/PHASE3.md). In the app, tick
 > "Spectro-temporal analysis"; in the API, add `spectrotemporal=true` to `/api/frames`.
+>
+> **Offline / IRSA outages:** `python scripts/serve.py --mode cached` runs the app on the
+> real data already downloaded (5 fields), with no network; the default `auto` mode falls back
+> to that copy whenever IRSA fails, and says so on screen. See [docs/OFFLINE.md](docs/OFFLINE.md).
+>
+> **Calibrated ranking (Phase Three, Priority 2):** every track also carries a
+> `calibrated_score` next to the unchanged Phase Two `anomaly_score`. It is corrected for
+> brightness, coverage, catalogue completeness and quality, and validated by synthetic
+> injection. See [docs/RANKING.md](docs/RANKING.md).
 
 A public web tool to blink NASA SPHEREx epochs at any sky position, so moving
 or variable objects pop out visually — the same idea volunteers used on

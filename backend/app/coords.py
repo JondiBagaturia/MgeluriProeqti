@@ -203,6 +203,16 @@ def _apply_pm_lookup(coord: SkyCoord) -> ResolvedPosition:
     )
 
 
+def parse_coordinates_only(text: str) -> ResolvedPosition:
+    """Typed coordinates only: no name resolution, no network (offline mode)."""
+    text = text.strip()
+    for parser in (_try_sexagesimal, _try_sexagesimal_separated, _try_decimal):
+        coord = parser(text)
+        if coord is not None:
+            return ResolvedPosition(coord=coord, ref_epoch=Time("J2000"), source="coords")
+    raise CoordParseError(f"{text!r} is not sexagesimal or decimal coordinates.")
+
+
 def parse_position(text: str, pm_lookup: bool = False) -> ResolvedPosition:
     """Parse `text` as coordinates, or resolve it as an object name.
 

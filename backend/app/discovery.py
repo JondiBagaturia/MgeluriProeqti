@@ -686,6 +686,11 @@ def analyze_series(
     results.sort(key=lambda r: (-r["anomaly_score"], -r["detection_snr_median"]))
     for i, r in enumerate(results):
         r["rank"] = i + 1
+    # Phase Three, Priority 2: calibrated ranking ALONGSIDE the fields above
+    # (app/ranking.py). Adds calibration / calibrated_score / calibrated_rank;
+    # changes nothing that already exists.
+    from .ranking import calibrate_series
+    calibrate_series(results)
     return {
         "series": series,
         "n_frames": len(frames),

@@ -133,8 +133,31 @@ def _cone_csv(table: str, ra_r: float, dec_r: float, radius_r: float) -> str:
     raise CatalogError(f"{table} cone search failed: {last}")
 
 
+# Offline hook (app/offline.py): when set, called as override(table, ra, dec,
+# radius_deg) and returns cached cone-search CSV text (REAL catalogue rows
+# cached by scripts/cache_catalogs.py) instead of querying IRSA. None = live.
+CONE_OVERRIDE = None
+
+# Columns the pipeline reads; the cache keeps only these.
+NEEDED_COLUMNS = {
+    "gaia_dr3_source": ["source_id", "ra", "dec", "ra_error", "dec_error", "pmra", "pmdec", "pmra_error",
+                        "pmdec_error", "parallax", "phot_g_mean_mag"],
+    "catwise_2020": ["source_name", "ra_pm", "dec_pm", "sigra_pm", "sigdec_pm", "pmra", "pmdec", "sigpmra",
+                     "sigpmdec", "w1mpro", "w2mpro"],
+}
+
+
 def _cone(table: str, ra: float, dec: float, radius_deg: float) -> Table:
-    text = _cone_csv(table, round(ra, 5), round(dec, 5), round(radius_deg, 5))
+    from . import localdata
+
+    local = localdata.active_cone_field()
+    if CONE_OVERRIDE is not None:
+        text = CONE_OVERRIDE(table, ra, dec, radius_deg)
+    elif local is not None:
+        # app/localdata.py: REAL rows downloaded earlier for this field
+        text = localdata.cone(local, table, ra, dec, radius_deg)
+    else:
+        text = _cone_csv(table, round(ra, 5), round(dec, 5), round(radius_deg, 5))
     if not text.strip():
         return Table()
     try:

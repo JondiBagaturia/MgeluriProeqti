@@ -17,7 +17,7 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
-from .coords import parse_position, CoordParseError, ResolvedPosition
+from .coords import parse_position, parse_coordinates_only, CoordParseError, ResolvedPosition
 from .irsa import find_images, discover_collections, DiscoveryError
 from .stream import stream_frames, DownloadProgress
 from .spectrum import compute_spectrum
@@ -25,6 +25,7 @@ from .cache import TTLDedupeCache
 from .config import get_config
 from .jsonsafe import clean
 from . import store
+from . import localdata
 from pydantic import BaseModel
 from dataclasses import asdict
 from functools import lru_cache
@@ -58,7 +59,25 @@ def _parse_detectors(detectors: Optional[str]) -> Optional[list[str]]:
 def _parse_cached(position: str, pm_lookup: bool) -> ResolvedPosition:
     # Name resolution hits SIMBAD (seconds); every endpoint re-resolves the
     # same string, so memoise successful lookups for the process lifetime.
-    return parse_position(position, pm_lookup=pm_lookup)
+    mode = localdata.data_mode()
+    if mode == "cached":
+        # no network: a downloaded field's saved SIMBAD result, else coordinates
+        local = localdata.resolve_name(position)
+        if local is not None:
+            return local
+        try:
+            return parse_coordinates_only(position)
+        except CoordParseError as exc:
+            raise CoordParseError(f"Offline mode: {position!r} is not coordinates and not a downloaded field. "
+                                  f"{localdata.available_text()}") from exc
+    try:
+        return parse_position(position, pm_lookup=pm_lookup)
+    except CoordParseError as exc:
+        local = localdata.resolve_name(position) if mode == "auto" else None
+        if local is None:
+            raise
+        local.note = f"Name resolvers unavailable ({str(exc)[:100]}...). " + (local.note or "")
+        return local
 
 
 def _resolve_or_400(position: str, pm_lookup: bool = True) -> ResolvedPosition:
@@ -84,12 +103,24 @@ def health():
     return {"status": "ok"}
 
 
+@app.get("/api/local-data")
+def local_data():
+    """Data mode (SPHEREX_DATA_MODE: live / auto / cached) and the fields
+    downloaded for offline use (app/localdata.py)."""
+    return {"mode": localdata.data_mode(), "root": str(localdata.data_root()),
+            "fields": [f.describe() for f in localdata.fields()]}
+
+
 @app.get("/api/releases")
 async def releases():
     """Currently-discovered SPHEREx collections (see app/irsa.py's runtime
     discovery). The frontend folds this into its IndexedDB cache key so a
     new data release invalidates cached frames automatically, without the
     browser ever hard-coding a release name either."""
+    if localdata.data_mode() == "cached":
+        # offline: the releases the downloaded exposures came from (no network)
+        collections = sorted({e["collection"] for f in localdata.fields() for e in f.manifest["exposures"]})
+        return JSONResponse({"collections": collections, "data_mode": "cached"})
     collections = await run_in_threadpool(discover_collections)
     return JSONResponse({"collections": collections}, headers={"Cache-Control": "public, max-age=3600"})
 
@@ -134,9 +165,10 @@ async def images(
 
     async def compute():
         try:
-            records = await run_in_threadpool(find_images, resolved.coord, fov_arcmin, det_list)
-        except DiscoveryError as exc:
+            choice = await run_in_threadpool(localdata.choose_source, resolved, fov_arcmin, det_list)
+        except (DiscoveryError, localdata.NoLocalData) as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
+        records = choice.records or []
         return [
             {"obs_id": r.obs_id, "collection": r.collection, "detector": r.detector, "time_mjd": r.time_mjd}
             for r in records
@@ -216,35 +248,61 @@ async def frames(
     det_list = _parse_detectors(detectors)
     max_exposures = get_config().quality.max_exposures(quality)
 
+    def lines_for(choice, sent):
+        """NDJSON lines of one data source (app/localdata.py): live IRSA or the
+        locally downloaded copy. `sent` counts frames already streamed."""
+        if choice.kind == localdata.LOCAL:
+            yield (json.dumps({"type": "data_source", "data_source": choice.kind, "note": choice.note,
+                               "fov_arcmin": choice.fov_arcmin, "field": choice.field.describe()}) + "\n").encode("utf-8")
+        for encoded in stream_frames(resolved, choice.fov_arcmin, det_list, group, resolve_seconds, max_exposures,
+                                     shiftstack=shiftstack, spectrotemporal=spectrotemporal,
+                                     records_override=choice.records, cutout_source=choice.cutout_source,
+                                     data_source=choice.kind, local_field=choice.field, source_note=choice.note,
+                                     report_progress=progress):
+            if isinstance(encoded, DownloadProgress):
+                line = {
+                    "progress": {
+                        "downloaded": encoded.n_downloaded,
+                        "failed": encoded.n_failed,
+                        "total": encoded.n_total,
+                    }
+                }
+                yield (json.dumps(line) + "\n").encode("utf-8")
+                continue
+            if isinstance(encoded, dict):  # the end-of-stream analysis record
+                _store_candidates(encoded, position)
+                yield (json.dumps(clean(encoded), allow_nan=False) + "\n").encode("utf-8")
+                continue
+            line = {
+                "width": encoded.width,
+                "height": encoded.height,
+                "scale": encoded.scale,
+                "offset": encoded.offset,
+                "payload_b64": encoded.payload_b64,
+                **encoded.metadata,
+            }
+            sent["frames"] += 1
+            yield (json.dumps(clean(line), allow_nan=False) + "\n").encode("utf-8")
+
     def generate():
         try:
-            for encoded in stream_frames(resolved, fov_arcmin, det_list, group, resolve_seconds, max_exposures,
-                                         shiftstack=shiftstack, spectrotemporal=spectrotemporal,
-                                         report_progress=progress):
-                if isinstance(encoded, DownloadProgress):
-                    line = {
-                        "progress": {
-                            "downloaded": encoded.n_downloaded,
-                            "failed": encoded.n_failed,
-                            "total": encoded.n_total,
-                        }
-                    }
-                    yield (json.dumps(line) + "\n").encode("utf-8")
-                    continue
-                if isinstance(encoded, dict):  # the end-of-stream analysis record
-                    _store_candidates(encoded, position)
-                    yield (json.dumps(clean(encoded), allow_nan=False) + "\n").encode("utf-8")
-                    continue
-                line = {
-                    "width": encoded.width,
-                    "height": encoded.height,
-                    "scale": encoded.scale,
-                    "offset": encoded.offset,
-                    "payload_b64": encoded.payload_b64,
-                    **encoded.metadata,
-                }
-                yield (json.dumps(clean(line), allow_nan=False) + "\n").encode("utf-8")
-        except DiscoveryError as exc:
+            # live IRSA, or the locally downloaded data (app/localdata.py, SPHEREX_DATA_MODE)
+            choice = localdata.choose_source(resolved, fov_arcmin, det_list)
+            sent = {"frames": 0}
+            try:
+                yield from lines_for(choice, sent)
+            except DiscoveryError as exc:
+                # IRSA found the images but could not deliver any of them (busy):
+                # in auto mode, use the downloaded copy if this field has one.
+                if choice.kind != localdata.LIVE or sent["frames"] or not localdata.fallback_allowed():
+                    raise
+                try:
+                    local = localdata.local_choice(resolved.search_position(), fov_arcmin, det_list,
+                                                   f"IRSA could not deliver the images ({localdata._short(exc)}).")
+                except localdata.NoLocalData:
+                    raise exc
+                yield from lines_for(local, sent)
+        except (DiscoveryError, localdata.NoLocalData) as exc:
             yield (json.dumps({"error": str(exc)}) + "\n").encode("utf-8")
         except Exception as exc:  # noqa: BLE001 - a mid-stream crash must reach the user, not just cut the stream
             log.exception("frame stream failed")
@@ -325,8 +383,11 @@ async def spectrum(
     fov_arcmin = _validate_fov(fov)
     det_list = _parse_detectors(detectors)
     try:
-        points = await run_in_threadpool(compute_spectrum, resolved, fov_arcmin, det_list)
-    except DiscoveryError as exc:
+        choice = await run_in_threadpool(localdata.choose_source, resolved, fov_arcmin, det_list)
+        points = await run_in_threadpool(compute_spectrum, resolved, fov_arcmin, det_list, None,
+                                         choice.records if choice.kind == localdata.LOCAL else None,
+                                         choice.cutout_source)
+    except (DiscoveryError, localdata.NoLocalData) as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return JSONResponse(
         clean(
@@ -343,6 +404,8 @@ async def spectrum(
                     "within one epoch."
                 ),
                 "points": [asdict(p) for p in points],
+                "data_source": choice.kind,
+                "data_source_note": choice.note,
             }
         ),
         headers={"Cache-Control": "public, max-age=300"},

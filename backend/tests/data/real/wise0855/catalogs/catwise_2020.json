@@ -1,0 +1,11 @@
+{
+ "table": "catwise_2020",
+ "centre_deg": [
+  133.7597838895181,
+  -7.242183715665885
+ ],
+ "radius_deg": 0.07,
+ "n_rows": 643,
+ "retrieved_utc": "2026-11-15T08:32:52Z",
+ "note": "REAL catalogue rows from IRSA /SCS; only the columns the pipeline uses are kept."
+}

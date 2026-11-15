@@ -33,6 +33,7 @@ For typed coordinates the app asks CatWISE2020 whether a known fast mover passed
 <!-- Loading: the bar and, beside it (never on top of it), Stop / Start again.
      The pair has a fixed place of its own; it does not move when the top
      window opens or hides. -->
+<div id="data-source-banner" class="data-source-banner window" hidden></div>
 <div id="progress-wrap" hidden>
   <div id="progress-track">
     <div id="progress-bar"></div>
@@ -98,11 +99,40 @@ For typed coordinates the app asks CatWISE2020 whether a known fast mover passed
           <option value="difference">Difference (B − A)</option>
           <option value="sum">Mean of all epochs</option>
           <option value="shiftstack">Shift-and-stack S/N map</option>
+          <option value="rgb">False-colour IR (RGB)</option>
         </select>
       </label>
       <div id="ab-pick" hidden>
         <label>Frame A <input id="diff-a-slider" type="range" min="0" max="0" value="0"></label>
         <label>Frame B <input id="diff-b-slider" type="range" min="0" max="0" value="0"></label>
+      </div>
+      <div id="rgb-controls" class="rgb-controls" hidden>
+        <div class="rgb-row">
+          <label>Epoch <select id="rgb-epoch-select"></select></label>
+          <button id="rgb-prev" type="button" class="icon-btn" title="Previous epoch (←)">◀</button>
+          <button id="rgb-next" type="button" class="icon-btn" title="Next epoch (→)">▶</button>
+          <button id="rgb-play" type="button" class="text-btn" title="Step through the epochs to compare their false colour">▶ Blink epochs</button>
+        </div>
+        <div class="rgb-row">
+          <label>Stretch <select id="rgb-stretch-mode">
+            <option value="colour" selected>Colour-preserving asinh (true flux ratios)</option>
+            <option value="per_channel">Per-channel normalised asinh (contrast, not flux ratios)</option>
+          </select></label>
+        </div>
+        <div class="rgb-row">
+          <label title="asinh softening β in units of the sky noise: small = more compression of bright sources, faint ones brighter">Softening <input id="rgb-soft-slider" type="range" min="0" max="100" value="33"> <span id="rgb-soft-value"></span></label>
+          <label title="Black point in units of the sky noise">Black point <input id="rgb-black-slider" type="range" min="-2" max="5" step="0.1" value="0.5"> <span id="rgb-black-value"></span></label>
+          <label title="Intensity percentile mapped to full brightness">White <input id="rgb-white-slider" type="range" min="95" max="100" step="0.1" value="99.7"> <span id="rgb-white-value"></span></label>
+        </div>
+        <details>
+          <summary>Manual channels (advanced)</summary>
+          <div class="rgb-row">
+            <label>Red <select id="rgb-r-select"><option value="auto">Auto</option></select></label>
+            <label>Green <select id="rgb-g-select"><option value="auto">Auto</option></select></label>
+            <label>Blue <select id="rgb-b-select"><option value="auto">Auto</option></select></label>
+          </div>
+          <p class="status-text">Frames from different epochs can be combined here for inspection; the legend then shows a cross-epoch warning.</p>
+        </details>
       </div>
       <p id="contamination-summary" class="status-text"></p>
       <p class="status-text">Differences are not PSF-matched and use nearest-pixel alignment: bright <em>stationary</em> stars also leave residuals. Compare a candidate with its neighbours before reading anything into it.</p>
@@ -172,6 +202,7 @@ For typed coordinates the app asks CatWISE2020 whether a known fast mover passed
 </aside>
 
 <footer class="dock dock-bottom" data-edge="bottom">
+  <div id="rgb-legend" class="rgb-legend window" hidden></div>
   <div id="frame-label" class="frame-label window"></div>
   <div class="playback-bar window">
     <button type="button" id="step-back-btn" class="icon-btn" title="Previous frame (←)">⏮</button>
@@ -208,6 +239,7 @@ For typed coordinates the app asks CatWISE2020 whether a known fast mover passed
       <button type="button" class="tab-btn" data-tab="sources-tab-shiftstack" aria-selected="false">Shift-and-stack</button>
       <span class="tab-gap"></span>
       <label class="check"><input id="show-tracks-checkbox" type="checkbox" checked> Mark on the image</label>
+      <label class="inline" title="Raw: the Phase Two score. Calibrated: the same weights, with motion and variability calibrated against peers of similar S/N and coverage, the catalogue term gated by local catalogue completeness, and quality caps.">Order by <select id="rank-order-select"><option value="calibrated" selected>Calibrated score</option><option value="raw">Raw score (Phase 2)</option></select></label>
       <button type="button" id="export-json-btn" class="text-btn" disabled>Export JSON</button>
       <button type="button" id="export-csv-btn" class="text-btn" disabled>Export CSV</button>
     </div>
@@ -219,7 +251,8 @@ For typed coordinates the app asks CatWISE2020 whether a known fast mover passed
             <thead>
               <tr>
                 <th>#</th><th title="catalogued = uniquely matched to Gaia/CatWISE; candidate = worth a look; uncertain = measurement not trustworthy">Status</th>
-                <th title="0-1, weighted motion + variability + missing catalogue counterpart. Not a probability.">Anomaly</th>
+                <th title="Phase Two score: 0.45 motion + 0.30 variability + 0.25 no catalogue counterpart. Not a probability.">Raw</th>
+                <th title="Same weights; motion/variability calibrated against peers of similar S/N and coverage, catalogue term only when the source is above local catalogue completeness, capped for quality problems. Not a probability. ▼ = reduced or capped (see the detail panel).">Calibrated</th>
                 <th title="How far the measurement itself can be trusted">Reliability</th>
                 <th title="Median detection signal-to-noise">S/N</th><th>Epochs</th><th>Proper motion</th>
                 <th title="Probability of the measured scatter if the flux were constant (6% systematic error included)">Variability</th>
@@ -258,9 +291,19 @@ For typed coordinates the app asks CatWISE2020 whether a known fast mover passed
         <button type="button" class="tab-btn" data-tab="st-tab-table" aria-selected="false">All measurements</button>
       </div>
       <div class="tab-pane" id="st-tab-sed">
+        <div class="st-controls">
+          <label class="inline">Range <select id="st-range-select"><option value="full" selected>Full SPHEREx range (0.75–5.0 µm)</option><option value="observed">Observed range</option></select></label>
+          <label class="inline">Flux <select id="st-scale-select"><option value="auto" selected>Auto (log if range &gt; 5×)</option><option value="linear">Linear</option><option value="log">Log</option></select></label>
+          <label class="check"><input id="st-show-flagged" type="checkbox" checked> Flagged</label>
+          <label class="check"><input id="st-show-limits" type="checkbox" checked> Upper limits</label>
+          <label class="check"><input id="st-show-noflux" type="checkbox" checked> No-flux</label>
+          <label class="check" title="Each detector's shared-shape fit a_e·S(λ) per epoch, from the change statistics. A guide only: the points are the data."><input id="st-show-model" type="checkbox"> Model guide</label>
+        </div>
+        <p class="status-text st-key">Colour = epoch; shape = detector (● D1 ■ D2 ◆ D3 ▲ D4 ⬢ D5 ★ D6). Filled = valid ±1σ; hollow, dashed bar = saturation-related flag in the aperture; arrow = 3σ upper limit; × on the baseline = no flux. Hatched bands: no exposures from that detector.</p>
         <div id="st-epoch-boxes" class="st-epoch-boxes"></div>
-        <div class="plot-box plot-fill"><canvas id="st-sed-canvas" width="900" height="260"></canvas></div>
+        <div class="plot-box plot-fill"><canvas id="st-sed-canvas" width="900" height="260"></canvas><div id="st-tooltip" class="st-tooltip" hidden></div></div>
         <p id="st-hover" class="status-text">Hover a point to see its measurement.</p>
+        <p id="st-sed-caption" class="status-text"></p>
         <p class="status-text">F<sub>ν</sub> in mJy (r = 9″ aperture, not aperture-corrected). One panel per detector: the gap between detectors is not observed. Filled = valid; hollow = valid but a saturation-related flag is in the aperture; arrow = 3σ upper limit; × on the baseline = no flux (red: saturated). Coloured bars under each panel: wavelengths actually sampled per epoch. Points of one epoch were taken over several days; only dichroic pairs (D1/D4, D2/D5, D3/D6) are simultaneous. No line is drawn between points.</p>
       </div>
       <div class="tab-pane" id="st-tab-lc" hidden>

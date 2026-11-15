@@ -1,0 +1,11 @@
+{
+ "table": "gaia_dr3_source",
+ "centre_deg": [
+  248.1672332905331,
+  66.7550238005368
+ ],
+ "radius_deg": 0.07,
+ "n_rows": 96,
+ "retrieved_utc": "2026-11-15T08:30:09Z",
+ "note": "REAL catalogue rows from IRSA /SCS; only the columns the pipeline uses are kept."
+}

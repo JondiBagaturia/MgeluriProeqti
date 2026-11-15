@@ -149,6 +149,47 @@ class ProcessedCutout:
     contamination: dict[str, int]
     central_wavelength_um: Optional[float] = None
     bandwidth_um: Optional[float] = None
+    # Output-grid pixels whose 2x2 interpolation footprint in the native
+    # cutout contains a saturation flag (SATURATION_FLAG_NAMES).
+    # These pixels still carry a value (only NONFUNC/MISSING_DATA/HOT/COLD
+    # are masked), so display code that must not trust them (the
+    # false-colour composite) needs to know where they are.
+    saturation: Optional[np.ndarray] = None
+
+
+# Flags that mean "the value is there but saturated or non-linear".
+# SUR_ERROR is deliberately NOT included: on the cached real cutouts
+# (Barnard, RW Aur, WISE 0855) 21-70 % of SUR_ERROR pixels are at sky level
+# (pixel S/N < 5), i.e. it marks ramp-fit problems such as cosmic-ray hits,
+# not saturation; OVERFLOW and BLOOM pixels are 97-100 % bright (S/N > 5).
+SATURATION_FLAG_NAMES = ("OVERFLOW", "BLOOM", "NONLINEAR")
+
+
+def saturation_on_grid(flags: np.ndarray, flag_names: dict[int, str], x_in: np.ndarray, y_in: np.ndarray,
+                       shape_out: tuple[int, int]) -> np.ndarray:
+    """Boolean map on the output grid: True where any native pixel of the
+    2x2 neighbourhood around the output pixel's input position carries a
+    saturation-related flag. Conservative on purpose: the resampled value
+    there is built partly from saturated or non-linear data."""
+    bits = [b for b, n in flag_names.items() if n in SATURATION_FLAG_NAMES]
+    out = np.zeros(shape_out[0] * shape_out[1], dtype=bool)
+    if not bits:
+        return out.reshape(shape_out)
+    f = flags.astype(np.int64)
+    sat = np.zeros(f.shape, dtype=bool)
+    for b in bits:
+        sat |= ((f >> b) & 1).astype(bool)
+    if not sat.any():
+        return out.reshape(shape_out)
+    h, w = sat.shape
+    x0 = np.floor(x_in).astype(np.int64)
+    y0 = np.floor(y_in).astype(np.int64)
+    for dy in (0, 1):
+        for dx in (0, 1):
+            xi, yi = x0 + dx, y0 + dy
+            ok = (xi >= 0) & (xi < w) & (yi >= 0) & (yi < h)
+            out[ok] |= sat[yi[ok], xi[ok]]
+    return out.reshape(shape_out)
 
 
 def reproject_nearest(data_in: np.ndarray, wcs_in: WCS, wcs_out: WCS, shape_out: tuple[int, int]) -> np.ndarray:
@@ -249,6 +290,7 @@ def process_cutout(
     )
 
     wavelength_um, bandwidth_um = central_wavelength(hdul, target_coord)
+    saturation = saturation_on_grid(flags, flag_names, coords[0], coords[1], shape_out)
 
     return ProcessedCutout(
         record=cutout.record,
@@ -258,6 +300,7 @@ def process_cutout(
         contamination=flag_contamination_summary(flags, flag_names),
         central_wavelength_um=wavelength_um,
         bandwidth_um=bandwidth_um,
+        saturation=saturation,
     )
 
 

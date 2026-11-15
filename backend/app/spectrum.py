@@ -69,13 +69,18 @@ def compute_spectrum(
     fov_arcmin: float,
     detectors: Optional[list[str]],
     max_exposures: Optional[int] = None,
+    records_override: Optional[list] = None,
+    cutout_source=None,
 ) -> list[SpectrumPoint]:
     cfg = get_config()
     cap = cfg.spectrum_max_exposures if max_exposures is None else max_exposures
 
     # Search (and cut out) around the position at the mean epoch, not J2000:
     # for Barnard's Star those differ by ~4.5 arcmin.
-    records = find_images(resolved.search_position(), fov_arcmin=fov_arcmin, detectors=detectors)
+    if records_override is not None:   # app/localdata.py (downloaded data)
+        records = [r for r in records_override if not detectors or r.detector in detectors]
+    else:
+        records = find_images(resolved.search_position(), fov_arcmin=fov_arcmin, detectors=detectors)
     if records and resolved.has_proper_motion:
         mean_mjd = float(np.mean([r.time_mjd for r in records]))
         centre = resolved.propagate_to(Time(mean_mjd, format="mjd"))
@@ -84,7 +89,7 @@ def compute_spectrum(
     records = _cap_records(records, cap)
 
     points: list[SpectrumPoint] = []
-    for cutout in fetch_cutouts(records, centre, fov_arcmin=fov_arcmin):
+    for cutout in (cutout_source or fetch_cutouts)(records, centre, fov_arcmin=fov_arcmin):
         hdul = cutout.hdul
         header = hdul["IMAGE"].header
         wcs = WCS(header)
