@@ -207,7 +207,9 @@ The real-data tests cover:
 - A comparison with any official IRSA SPHEREx spectral product, if one with comparable
   calibration exists.
 - Larger reference samples (wider fields).
-- A combined spectro-temporal score (deliberately not built).
+- A combined spectro-temporal score (deliberately not built). The calibrated ranking of
+  Priority 2 ([RANKING.md](RANKING.md)) recalibrates the existing motion, variability and
+  catalogue terms only; it adds no spectro-temporal term.
 
 ## 9. Reproduction
 

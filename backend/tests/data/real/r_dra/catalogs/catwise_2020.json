@@ -1,0 +1,11 @@
+{
+ "table": "catwise_2020",
+ "centre_deg": [
+  248.1672332905331,
+  66.7550238005368
+ ],
+ "radius_deg": 0.07,
+ "n_rows": 0,
+ "retrieved_utc": "2026-11-15T08:30:27Z",
+ "note": "REAL catalogue rows from IRSA /SCS; only the columns the pipeline uses are kept. Zero rows is the real IRSA answer (checked again 2026-11-15): CatWISE2020 has no sources within 0.07 deg of R Dra, presumably a hole around this very bright star."
+}

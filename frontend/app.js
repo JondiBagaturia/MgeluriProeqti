@@ -71,7 +71,7 @@
   const detectorViewSelect = $("detector-view-select");
   // Bump when the frame wire format changes, so stale IndexedDB entries
   // (e.g. frames without grid WCS / photometry) are never revived.
-  const FRAME_SCHEMA = "v5";
+  const FRAME_SCHEMA = "v6";
   // Click within this distance of the predicted target position -> spectrum
   // follows the target's proper motion per exposure (2 native pixels).
   const TRACK_CLICK_RADIUS_ARCSEC = 12.3;
@@ -1020,6 +1020,7 @@
   const analysisTableBody = $("analysis-table-body");
   const analysisDetail = $("analysis-detail");
   const showTracksCheckbox = $("show-tracks-checkbox");
+  const rankOrderSelect = $("rank-order-select");
   const exportJsonBtn = $("export-json-btn");
   const exportCsvBtn = $("export-csv-btn");
 
@@ -1124,17 +1125,24 @@
     if (series.warning) notes.push(series.warning);
     if (a.catalog_errors && a.catalog_errors.length) notes.push(`Catalogue problem: ${a.catalog_errors.join("; ")}`);
     if (a.store_error) notes.push(`Classification storage unavailable: ${a.store_error}`);
-    notes.push("Ranked by anomaly score (0–1: weighted motion, variability, missing catalogue counterpart). It is not a probability, and no object type is estimated.");
+    notes.push("Two rankings are shown: the raw Phase Two anomaly score (0–1: weighted motion, variability, missing catalogue counterpart) and a calibrated score with the same weights whose inputs are corrected for brightness, coverage, catalogue completeness and quality. Neither is a probability, and no object type is estimated.");
     analysisStatus.textContent = notes.join(" ");
 
-    for (const t of series.tracks) {
+    const ordered = series.tracks.slice().sort((a, b) =>
+      rankOrderSelect.value === "calibrated" && a.calibrated_rank != null ? a.calibrated_rank - b.calibrated_rank : a.rank - b.rank);
+    for (const t of ordered) {
       const tr = document.createElement("tr");
       if (t.rank === state.selectedRank) tr.className = "selected";
       const labelCell = el("td", t.label);
       labelCell.style.color = LABEL_COLORS[t.label] || "";
-      tr.appendChild(el("td", String(t.rank)));
+      tr.appendChild(el("td", rankOrderSelect.value === "calibrated" && t.calibrated_rank != null ? String(t.calibrated_rank) : String(t.rank)));
       tr.appendChild(labelCell);
       tr.appendChild(el("td", t.anomaly_score.toFixed(2)));
+      const cal = t.calibration;
+      const reduced = cal && (cal.calibrated_score + 1e-9 < t.anomaly_score);
+      const calCell = el("td", cal ? `${cal.calibrated_score.toFixed(2)}${reduced ? " ▼" : ""}` : "—");
+      if (cal && cal.suppression_reasons.length) calCell.title = cal.suppression_reasons.join(" ");
+      tr.appendChild(calCell);
       tr.appendChild(el("td", t.reliability));
       tr.appendChild(el("td", t.detection_snr_median.toFixed(0)));
       tr.appendChild(el("td", `${t.n_epochs}/${t.n_frames_in_series}`));
@@ -1172,6 +1180,41 @@
     analysisDetail.appendChild(why);
 
     // --- astrometry: linear fit (reported) and parallax-aware fit (shown, not adopted unless constrained) ---
+    // --- calibrated ranking (Phase 3, Priority 2), next to the raw Phase 2 numbers ---
+    const cal = t.calibration;
+    if (cal) {
+      const cb = el("div");
+      cb.appendChild(el("strong", `Calibrated ranking: ${cal.calibrated_score.toFixed(2)} (raw Phase 2 score ${t.anomaly_score.toFixed(2)}; calibrated rank #${t.calibrated_rank}, raw rank #${t.rank})`));
+      const cl = el("ul");
+      const rc = t.score_components;
+      cl.appendChild(el("li", `Components, raw → calibrated: motion ${rc.motion.toFixed(2)} → ${cal.M_norm.toFixed(2)}, variability ${rc.variability.toFixed(2)} → ${cal.V_norm.toFixed(2)}, ` +
+        `no catalogue counterpart ${rc.no_catalogue_counterpart.toFixed(2)} → ${cal.C_norm.toFixed(2)} (weights 0.45 / 0.30 / 0.25).`));
+      const mc = cal.motion_calibration;
+      if (mc && mc.available) {
+        const lvl = mc.peer_level === "analytic" ? "too few peers: the analytic error model is used (no correction)"
+          : `${mc.n_peers} clean peers (${mc.peer_level.replace(/_/g, " ")}; S/N ${mc.snr_bin[0]}–${Number.isFinite(mc.snr_bin[1]) ? mc.snr_bin[1] : "∞"}, ${mc.coverage_bin} epochs)`;
+        cl.appendChild(el("li", `Motion significance calibrated against ${lvl}: inflation ×${mc.inflation.toFixed(2)}` +
+          `${mc.inflation_capped ? " (capped)" : ""}; p = ${mc.p_analytic.toExponential(1)} → ${mc.p_calibrated.toExponential(1)}` +
+          `${mc.empirical_rarity_bound != null ? `; ${mc.n_peers_at_least_as_extreme} of ${mc.n_peers} peers at least as extreme (≤ ${mc.empirical_rarity_bound.toFixed(2)})` : ""}.`));
+      }
+      const vc = cal.variability_calibration;
+      if (vc && vc.available) {
+        cl.appendChild(el("li", `Variability calibrated (${vc.peer_level.replace(/_/g, " ")}, ${vc.n_peers} peers): inflation ×${vc.inflation.toFixed(2)}; p = ${vc.p_analytic.toExponential(1)} → ${vc.p_calibrated.toExponential(1)}.`));
+      }
+      const REG = { matched: "matched", above_completeness: "unmatched, and bright enough that it should be in the catalogue",
+        below_completeness: "unmatched, but fainter than the local completeness limit: expected to be missing",
+        completeness_unknown: "unmatched; completeness could not be estimated here (half weight)",
+        catalogue_incomplete_here: "unmatched, but the catalogue matches none of the clean sources in this field (no coverage)",
+        unavailable: "catalogue query failed or not run" };
+      for (const [name, c] of Object.entries(cal.completeness)) {
+        const lim = c.completeness_flux_mjy != null ? ` (local limit ${fmtFlux(c.completeness_flux_mjy)} mJy, source ${fmtFlux(c.source_flux_mjy)} mJy)` : "";
+        cl.appendChild(el("li", `${name}: ${REG[c.regime] || c.regime}${lim}.`));
+      }
+      for (const r of cal.explanation.concat(cal.suppression_reasons)) cl.appendChild(el("li", r));
+      cb.appendChild(cl);
+      analysisDetail.appendChild(cb);
+    }
+
     const ast = el("div");
     ast.appendChild(el("strong", "Astrometry"));
     const al = el("ul");
@@ -1360,6 +1403,7 @@
       "parallax_fit_mas", "parallax_fit_err_mas", "parallax_constrained", "mean_flux_mjy", "variability_p_value",
       "wavelength_mismatch", "gaia_status", "gaia_source_id", "gaia_separation_arcsec", "catwise_status", "catwise_source_id",
       "catwise_separation_arcsec", "flags", "reasons", "caveats", "candidate_id",
+      "calibrated_score", "calibrated_rank", "M_norm", "V_norm", "C_norm", "completeness_regime", "quality_cap", "suppression_reasons",
     ];
     const quote = (v) => (v == null ? "" : /[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : String(v));
     const lines = [cols.join(",")];
@@ -1380,6 +1424,11 @@
           catwise_status: t.catwise.status, catwise_source_id: t.catwise.source ? t.catwise.source.source_id : "",
           catwise_separation_arcsec: t.catwise.separation_arcsec,
           flags: t.flags.join("|"), reasons: t.reasons.join(" | "), caveats: t.caveats.join(" | "), candidate_id: t.candidate_id || "",
+          calibrated_score: t.calibration ? t.calibration.calibrated_score : "", calibrated_rank: t.calibrated_rank != null ? t.calibrated_rank : "",
+          M_norm: t.calibration ? t.calibration.M_norm : "", V_norm: t.calibration ? t.calibration.V_norm : "",
+          C_norm: t.calibration ? t.calibration.C_norm : "", completeness_regime: t.calibration ? t.calibration.completeness_regime : "",
+          quality_cap: t.calibration ? t.calibration.quality_cap : "",
+          suppression_reasons: t.calibration ? t.calibration.suppression_reasons.join(" | ") : "",
         };
         lines.push(cols.map((c) => quote(row[c])).join(","));
       }
@@ -1388,6 +1437,7 @@
   });
 
   showTracksCheckbox.addEventListener("change", renderView);
+  rankOrderSelect.addEventListener("change", renderAnalysis);
 
   // ---------------------------------------------------------------------
   // Shift-and-stack (app/stream.py: run_shift_stack). Optional; requested
@@ -1590,7 +1640,8 @@
   const stTableBody = $("st-table-body");
   const stStatus = $("st-status");
   const stBody = $("st-body");
-  const EPOCH_COLORS = ["#5fb0ff", "#ffb454", "#7CFC9A", "#ff6b9d", "#c7a6ff", "#f2e35f"];
+  // Okabe-Ito (colour-blind safe), ordered for contrast on the dark background
+  const EPOCH_COLORS = ["#56B4E9", "#E69F00", "#009E73", "#CC79A7", "#F0E442", "#D55E00", "#0072B2", "#FFFFFF"];
   const STATE_TEXT = {
     valid: "valid",
     valid_flagged: "valid, saturation-related flag in aperture",
@@ -1674,8 +1725,13 @@
         drawSed(s);
       });
       lab.appendChild(cb);
-      const sw = el("span", ` Epoch ${e.index + 1}: ${fmtDate(e.mjd_min)}…${fmtDate(e.mjd_max)} (${(e.mjd_max - e.mjd_min).toFixed(1)} d)`);
-      sw.style.color = EPOCH_COLORS[i % EPOCH_COLORS.length];
+      const col = EPOCH_COLORS[i % EPOCH_COLORS.length];
+      const chip = el("span", "", "st-epoch-chip");
+      chip.style.background = col;
+      lab.appendChild(chip);
+      const nE = s.measurements.filter((m) => m.epoch_index === e.index).length;
+      const sw = el("span", ` Epoch ${e.index + 1}: ${fmtDate(e.mjd_min)}…${fmtDate(e.mjd_max)} (${(e.mjd_max - e.mjd_min).toFixed(1)} d, ${nE} exposures)`);
+      sw.style.color = col;
       lab.appendChild(sw);
       stEpochBoxes.appendChild(lab);
     });
@@ -1686,99 +1742,339 @@
     renderStTable(s);
   }
 
-  /** SED: one panel per detector (broken wavelength axis, so the gap between
-   * detectors is never drawn as if observed), shared log or linear y. */
+  // Nominal SPHEREx detector bands (µm). Only used to SHADE the axis so coverage
+  // gaps and detectors missing from this search are obvious; every point is
+  // placed at its own measured wavelength_um, never at a band centre.
+  const SPHEREX_BANDS = [
+    ["D1", 0.75, 1.11], ["D2", 1.11, 1.64], ["D3", 1.64, 2.42],
+    ["D4", 2.42, 3.82], ["D5", 3.82, 4.42], ["D6", 4.42, 5.00],
+  ];
+  const SPHEREX_RANGE = [0.75, 5.0];
+  const DET_MARKERS = { D1: "circle", D2: "square", D3: "diamond", D4: "triangle", D5: "hexagon", D6: "star" };
+  const DET_MARKER_TEXT = { circle: "●", square: "■", diamond: "◆", triangle: "▲", hexagon: "⬢", star: "★" };
+  const stRangeSelect = $("st-range-select");
+  const stScaleSelect = $("st-scale-select");
+  const stShowFlagged = $("st-show-flagged");
+  const stShowLimits = $("st-show-limits");
+  const stShowNoflux = $("st-show-noflux");
+  const stShowModel = $("st-show-model");
+  const stSedCaption = $("st-sed-caption");
+  const stTooltip = $("st-tooltip");
+
+  function markerPath(ctx, shape, x, y, r) {
+    ctx.beginPath();
+    if (shape === "square") { ctx.rect(x - r * 0.85, y - r * 0.85, 1.7 * r, 1.7 * r); return; }
+    if (shape === "diamond") { ctx.moveTo(x, y - 1.25 * r); ctx.lineTo(x + 1.05 * r, y); ctx.lineTo(x, y + 1.25 * r); ctx.lineTo(x - 1.05 * r, y); ctx.closePath(); return; }
+    if (shape === "triangle") { ctx.moveTo(x, y - 1.25 * r); ctx.lineTo(x + 1.15 * r, y + 0.8 * r); ctx.lineTo(x - 1.15 * r, y + 0.8 * r); ctx.closePath(); return; }
+    if (shape === "hexagon" || shape === "star") {
+      const n = shape === "star" ? 10 : 6;
+      for (let k = 0; k < n; k++) {
+        const a = -Math.PI / 2 + (2 * Math.PI * k) / n;
+        const rr = shape === "star" ? (k % 2 ? 0.75 * r : 1.7 * r) : 1.1 * r;
+        k ? ctx.lineTo(x + rr * Math.cos(a), y + rr * Math.sin(a)) : ctx.moveTo(x + rr * Math.cos(a), y + rr * Math.sin(a));
+      }
+      ctx.closePath();
+      return;
+    }
+    ctx.arc(x, y, r, 0, 2 * Math.PI);
+  }
+
+  function niceLinearTicks(lo, hi, n) {
+    const span = hi - lo;
+    if (!(span > 0)) return [lo];
+    const raw = span / n, mag = Math.pow(10, Math.floor(Math.log10(raw)));
+    const step = [1, 2, 2.5, 5, 10].map((f) => f * mag).find((s) => span / s <= n) || 10 * mag;
+    const out = [];
+    for (let v = Math.ceil(lo / step) * step; v <= hi + 1e-9 * span; v += step) out.push(Math.abs(v) < 1e-12 * step ? 0 : v);
+    return out;
+  }
+  /** Tick label with only the decimals the tick spacing needs (30, not 30.00). */
+  function tickText(v, ticks) {
+    if (v === 0) return "0";
+    const steps = ticks.slice(1).map((t, i) => Math.abs(t - ticks[i])).filter((d) => d > 0);
+    const step = steps.length ? Math.min(...steps) : Math.abs(v);
+    let dec = 0;
+    while (dec < 4 && Math.abs(step * 10 ** dec - Math.round(step * 10 ** dec)) > 1e-6 * 10 ** dec) dec++;
+    return v.toFixed(dec);
+  }
+  function logTicks(lo, hi) {
+    const out = [];
+    const decades = Math.log10(hi) - Math.log10(lo);
+    const mults = decades > 3 ? [1] : decades > 1.3 ? [1, 3] : [1, 2, 5];
+    for (let e = Math.floor(Math.log10(lo)); e <= Math.ceil(Math.log10(hi)); e++) {
+      for (const m of mults) { const v = m * Math.pow(10, e); if (v >= lo && v <= hi) out.push(v); }
+    }
+    return out;
+  }
+
+  /** Spectrum by epoch: ONE shared wavelength axis for all detectors. Every
+   * point is one exposure on native pixels at its own wavelength; nothing is
+   * averaged or merged across exposures, epochs or detectors. */
   function drawSed(s) {
     const ctx = stSedCanvas.getContext("2d");
     const W = stSedCanvas.width, H = stSedCanvas.height;
     ctx.clearRect(0, 0, W, H);
     ctx.font = "11px sans-serif";
     st.hoverPoints = [];
-    const ms = s.measurements;
-    const dets = s.detectors;
-    const shown = ms.filter((m) => st.selectedEpochs.set.has(m.epoch_index));
-    const vals = shown.filter((m) => m.flux_mjy != null && (m.state === "valid" || m.state === "valid_flagged"))
-      .map((m) => [m.flux_mjy - m.flux_err_mjy, m.flux_mjy + m.flux_err_mjy]).flat()
-      .concat(shown.filter((m) => m.state === "below_threshold").map((m) => m.upper_limit_mjy));
-    const pos = vals.filter((v) => v > 0);
-    const padL = 58, padB = 34, padT = 10, gap = 26;
-    if (!pos.length) {
-      ctx.fillStyle = "#8b96ab";
-      ctx.fillText("No valid flux in the selected epochs (see the measurement table for why).", padL, H / 2);
-    }
-    const lo = pos.length ? Math.min(...pos) : 1, hi = pos.length ? Math.max(...pos) : 10;
-    const useLog = hi / lo > 5;
-    const yMin = useLog ? lo / 1.5 : Math.min(0, lo - 0.1 * (hi - lo)), yMax = useLog ? hi * 1.5 : hi + 0.1 * (hi - lo);
-    const yOf = (f) => {
-      if (useLog) return padT + (1 - (Math.log10(Math.max(f, yMin)) - Math.log10(yMin)) / (Math.log10(yMax) - Math.log10(yMin))) * (H - padT - padB);
-      return padT + (1 - (f - yMin) / (yMax - yMin || 1)) * (H - padT - padB);
-    };
-    const panelW = (W - padL - 10 - gap * (dets.length - 1)) / Math.max(dets.length, 1);
-    ctx.fillStyle = "#8b96ab";
-    ctx.fillText(`${fmtFlux(yMax)}`, 4, padT + 8);
-    ctx.fillText(`${fmtFlux(yMin)}`, 4, H - padB);
-    ctx.save(); ctx.translate(12, H / 2 + 30); ctx.rotate(-Math.PI / 2);
-    ctx.fillText(`F_ν (mJy${useLog ? ", log" : ""})`, 0, 0); ctx.restore();
-    dets.forEach((det, k) => {
-      const dm = ms.filter((m) => m.detector === det && m.wavelength_um != null);
-      if (!dm.length) return;
-      const l0 = Math.min(...dm.map((m) => m.wavelength_um)) - 0.02, l1 = Math.max(...dm.map((m) => m.wavelength_um)) + 0.02;
-      const x0 = padL + k * (panelW + gap);
-      const xOf = (l) => x0 + ((l - l0) / (l1 - l0)) * panelW;
-      ctx.strokeStyle = "rgba(139,150,171,0.35)";
-      ctx.strokeRect(x0, padT, panelW, H - padT - padB);
-      ctx.fillStyle = "#8b96ab";
-      ctx.fillText(`${det}: ${l0.toFixed(2)}–${l1.toFixed(2)} µm`, x0 + 4, H - 4);
-      if (k > 0) ctx.fillText("//", x0 - gap / 2 - 5, H - padB + 4);
-      // per-epoch wavelength coverage bars (what was actually sampled)
-      s.epochs.forEach((e, i) => {
-        if (!st.selectedEpochs.set.has(e.index)) return;
-        const em = dm.filter((m) => m.epoch_index === e.index);
-        ctx.fillStyle = EPOCH_COLORS[i % EPOCH_COLORS.length];
-        for (const m of em) {
-          const bw = m.bandwidth_um || 0.04;
-          ctx.globalAlpha = 0.5;
-          ctx.fillRect(xOf(m.wavelength_um - bw / 2), H - padB + 4 + 4 * i, Math.max(1, xOf(m.wavelength_um + bw / 2) - xOf(m.wavelength_um - bw / 2)), 3);
-          ctx.globalAlpha = 1;
-        }
-      });
-      for (const m of dm) {
-        if (!st.selectedEpochs.set.has(m.epoch_index)) continue;
-        const i = s.epochs.findIndex((e) => e.index === m.epoch_index);
-        const col = EPOCH_COLORS[i % EPOCH_COLORS.length];
-        const x = xOf(m.wavelength_um);
-        let y;
-        if ((m.state === "valid" || m.state === "valid_flagged") && m.flux_mjy != null) {
-          y = yOf(m.flux_mjy);
-          ctx.strokeStyle = col; ctx.lineWidth = 1;
-          ctx.beginPath(); ctx.moveTo(x, yOf(m.flux_mjy - m.flux_err_mjy)); ctx.lineTo(x, yOf(m.flux_mjy + m.flux_err_mjy)); ctx.stroke();
-          ctx.beginPath(); ctx.arc(x, y, 3, 0, 2 * Math.PI);
-          if (m.state === "valid") { ctx.fillStyle = col; ctx.fill(); } else { ctx.stroke(); }   // hollow = flagged
-        } else if (m.state === "below_threshold") {
-          y = yOf(m.upper_limit_mjy);
-          ctx.strokeStyle = col; ctx.beginPath();
-          ctx.moveTo(x - 4, y); ctx.lineTo(x + 4, y); ctx.moveTo(x, y); ctx.lineTo(x, y + 12);
-          ctx.moveTo(x - 3, y + 8); ctx.lineTo(x, y + 12); ctx.lineTo(x + 3, y + 8); ctx.stroke();
-        } else {
-          y = H - padB - 6;                 // no flux: marked on the baseline, never given a value
-          ctx.strokeStyle = m.state === "saturated" ? "#ff6b6b" : "#777";
-          ctx.beginPath(); ctx.moveTo(x - 3, y - 3); ctx.lineTo(x + 3, y + 3); ctx.moveTo(x + 3, y - 3); ctx.lineTo(x - 3, y + 3); ctx.stroke();
-        }
-        st.hoverPoints.push({ x, y, m });
-      }
+    stTooltip.hidden = true;
+    const ms = s.measurements.filter((m) => m.wavelength_um != null && Number.isFinite(m.wavelength_um));
+    const epochIdx = new Map(s.epochs.map((e, i) => [e.index, i]));
+    const showFlagged = stShowFlagged.checked, showLimits = stShowLimits.checked, showNoflux = stShowNoflux.checked;
+    const hasFlux = (m) => m.flux_mjy != null && Number.isFinite(m.flux_mjy) && m.flux_err_mjy != null && Number.isFinite(m.flux_err_mjy);
+    const kindOf = (m) => (m.state === "valid" || m.state === "valid_flagged") && hasFlux(m) ? m.state
+      : m.state === "below_threshold" && m.upper_limit_mjy != null && Number.isFinite(m.upper_limit_mjy) ? "limit" : "noflux";
+    const visible = ms.filter((m) => {
+      if (!st.selectedEpochs.set.has(m.epoch_index)) return false;
+      const k = kindOf(m);
+      return k === "valid" || (k === "valid_flagged" && showFlagged) || (k === "limit" && showLimits) || (k === "noflux" && showNoflux);
     });
+
+    // --- wavelength axis
+    const padL = 62, padR = 14, padT = 22, nEp = s.epochs.length;
+    const padB = 46 + 4 * nEp;                 // x labels + per-epoch sampling strips
+    const plotW = W - padL - padR, plotH = H - padT - padB;
+    let l0, l1;
+    if (stRangeSelect.value === "observed" && ms.length) {
+      const ls = ms.map((m) => m.wavelength_um);
+      const a = Math.min(...ls), b = Math.max(...ls);
+      const pad = Math.max(0.05, 0.04 * (b - a));
+      l0 = Math.max(0.6, a - pad); l1 = Math.min(5.2, b + pad);
+    } else {
+      [l0, l1] = SPHEREX_RANGE;
+    }
+    const xOf = (l) => padL + ((l - l0) / (l1 - l0)) * plotW;
+
+    // --- flux axis (log is chosen automatically when the plotted dynamic range > 5x)
+    const fluxVals = [];
+    for (const m of visible) {
+      const k = kindOf(m);
+      if (k === "valid" || k === "valid_flagged") fluxVals.push(m.flux_mjy - m.flux_err_mjy, m.flux_mjy + m.flux_err_mjy, m.flux_mjy);
+      else if (k === "limit") fluxVals.push(m.upper_limit_mjy);
+    }
+    const pos = fluxVals.filter((v) => v > 0);
+    const centralPos = visible.filter((m) => (kindOf(m) === "valid" || kindOf(m) === "valid_flagged") && m.flux_mjy > 0).map((m) => m.flux_mjy)
+      .concat(visible.filter((m) => kindOf(m) === "limit" && m.upper_limit_mjy > 0).map((m) => m.upper_limit_mjy));
+    const dynRange = centralPos.length ? Math.max(...centralPos) / Math.min(...centralPos) : 1;
+    const useLog = stScaleSelect.value === "log" ? true : stScaleSelect.value === "linear" ? false : dynRange > 5;
+    let yMin, yMax;
+    if (useLog) {
+      const lo = pos.length ? Math.min(...pos) : 0.1, hi = pos.length ? Math.max(...pos) : 10;
+      yMin = lo / 1.4; yMax = hi * 1.4;
+    } else {
+      const lo = fluxVals.length ? Math.min(...fluxVals) : 0, hi = fluxVals.length ? Math.max(...fluxVals) : 1;
+      const span = hi - lo || Math.abs(hi) || 1;
+      yMin = Math.min(0, lo - 0.08 * span); yMax = hi + 0.08 * span;
+    }
+    const yOf = (f) => useLog
+      ? padT + (1 - (Math.log10(Math.min(Math.max(f, yMin), yMax)) - Math.log10(yMin)) / (Math.log10(yMax) - Math.log10(yMin))) * plotH
+      : padT + (1 - (Math.min(Math.max(f, yMin), yMax) - yMin) / (yMax - yMin)) * plotH;
+
+    // --- detector band shading and labels
+    const present = new Set(ms.map((m) => m.detector));
+    const failed = (stData() && stData().retrieval_failed_by_detector) || {};
+    SPHEREX_BANDS.forEach(([det, a, b], k) => {
+      const xa = Math.max(xOf(a), padL), xb = Math.min(xOf(b), padL + plotW);
+      if (xb <= xa) return;
+      if (present.has(det)) {
+        ctx.fillStyle = k % 2 ? "rgba(139,150,171,0.07)" : "rgba(139,150,171,0.035)";
+      } else {
+        ctx.fillStyle = "rgba(139,150,171,0.025)";
+      }
+      ctx.fillRect(xa, padT, xb - xa, plotH);
+      if (!present.has(det)) {                          // hatched: not observed in this search
+        ctx.save(); ctx.beginPath(); ctx.rect(xa, padT, xb - xa, plotH); ctx.clip();
+        ctx.strokeStyle = "rgba(139,150,171,0.12)"; ctx.lineWidth = 1;
+        for (let x = xa - plotH; x < xb; x += 10) { ctx.beginPath(); ctx.moveTo(x, padT + plotH); ctx.lineTo(x + plotH, padT); ctx.stroke(); }
+        ctx.restore();
+      }
+      ctx.strokeStyle = "rgba(139,150,171,0.35)"; ctx.setLineDash([2, 3]);
+      for (const xb2 of [xOf(a), xOf(b)]) if (xb2 > padL && xb2 < padL + plotW) { ctx.beginPath(); ctx.moveTo(xb2, padT); ctx.lineTo(xb2, padT + plotH); ctx.stroke(); }
+      ctx.setLineDash([]);
+      const n = ms.filter((m) => m.detector === det).length;
+      const lbl = present.has(det) ? `${DET_MARKER_TEXT[DET_MARKERS[det]]} ${det} · ${n}` : `${det} · ${failed[det] ? "retrieval failed" : "not in this search"}`;
+      ctx.fillStyle = present.has(det) ? "#c9d2e3" : "#6b7487";
+      const tw = ctx.measureText(lbl).width;
+      if (tw < xb - xa - 4) ctx.fillText(lbl, (xa + xb) / 2 - tw / 2, padT - 7);
+      else if (xb - xa > 18) { const t2 = det; ctx.fillText(t2, (xa + xb) / 2 - ctx.measureText(t2).width / 2, padT - 7); }
+    });
+    ctx.strokeStyle = "rgba(139,150,171,0.5)";
+    ctx.strokeRect(padL, padT, plotW, plotH);
+
+    // --- axes, ticks
+    ctx.fillStyle = "#8b96ab";
+    const yt = useLog ? logTicks(yMin, yMax) : niceLinearTicks(yMin, yMax, 5);
+    for (const v of yt) {
+      const y = yOf(v);
+      ctx.strokeStyle = "rgba(139,150,171,0.12)"; ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(padL + plotW, y); ctx.stroke();
+      const t = tickText(v, yt); ctx.fillText(t, padL - 6 - ctx.measureText(t).width, y + 4);
+    }
+    const xt = niceLinearTicks(l0, l1, Math.max(4, Math.floor(plotW / 80)));
+    for (const v of xt) {
+      const x = xOf(v);
+      ctx.strokeStyle = "rgba(139,150,171,0.5)"; ctx.beginPath(); ctx.moveTo(x, padT + plotH); ctx.lineTo(x, padT + plotH + 4); ctx.stroke();
+      const t = tickText(v, xt); ctx.fillText(t, x - ctx.measureText(t).width / 2, padT + plotH + 15);
+    }
+    const xl = "λ (µm), each point at its own measured wavelength";
+    ctx.fillText(xl, padL + plotW / 2 - ctx.measureText(xl).width / 2, H - 4);
+    ctx.save(); ctx.translate(14, padT + plotH / 2 + 40); ctx.rotate(-Math.PI / 2);
+    ctx.fillText(`F_ν (mJy${useLog ? ", log" : ", linear"})`, 0, 0); ctx.restore();
+
+    // --- per-epoch sampling strips (what was actually observed, by bandwidth)
+    s.epochs.forEach((e, i) => {
+      if (!st.selectedEpochs.set.has(e.index)) return;
+      ctx.fillStyle = EPOCH_COLORS[i % EPOCH_COLORS.length];
+      ctx.globalAlpha = 0.6;
+      for (const m of ms) {
+        if (m.epoch_index !== e.index) continue;
+        const bw = m.bandwidth_um != null && Number.isFinite(m.bandwidth_um) ? m.bandwidth_um : 0.02;
+        const xa = Math.max(padL, xOf(m.wavelength_um - bw / 2)), xb = Math.min(padL + plotW, xOf(m.wavelength_um + bw / 2));
+        if (xb > xa) ctx.fillRect(xa, padT + plotH + 21 + 4 * i, Math.max(1, xb - xa), 3);
+      }
+      ctx.globalAlpha = 1;
+    });
+
+    // --- optional model guide: the per-detector shared-shape fit a_e * S(lambda)
+    let modelDrawn = 0;
+    if (stShowModel.checked) {
+      for (const det of s.detectors) {
+        const fit = s.fits && s.fits[det];
+        if (!fit || !fit.knots_um || fit.knots_um.length < 2) continue;
+        fit.epochs.forEach((ei, j) => {
+          if (!st.selectedEpochs.set.has(ei)) return;
+          const a = fit.amplitudes_mjy[j];
+          if (!Number.isFinite(a)) return;
+          const col = EPOCH_COLORS[(epochIdx.get(ei) || 0) % EPOCH_COLORS.length];
+          ctx.strokeStyle = col; ctx.globalAlpha = fit.model_adequate ? 0.55 : 0.3; ctx.lineWidth = 1.2; ctx.setLineDash([5, 4]);
+          ctx.beginPath();
+          let started = false;
+          fit.knots_um.forEach((k, q) => {
+            const f = a * fit.shape[q];
+            if (useLog && !(f > 0)) { started = false; return; }
+            const x = xOf(k), y = yOf(f);
+            started ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+            started = true;
+          });
+          ctx.stroke();
+          ctx.setLineDash([]); ctx.globalAlpha = 1; ctx.lineWidth = 1;
+          modelDrawn++;
+        });
+      }
+    }
+
+    // --- the measurements themselves (drawn last, so they stay on top)
+    let hiddenNonPos = 0;
+    const order = visible.slice().sort((a, b) => (kindOf(a) === "valid") - (kindOf(b) === "valid"));
+    for (const m of order) {
+      const i = epochIdx.has(m.epoch_index) ? epochIdx.get(m.epoch_index) : 0;
+      const col = EPOCH_COLORS[i % EPOCH_COLORS.length];
+      const shape = DET_MARKERS[m.detector] || "circle";
+      const x = xOf(m.wavelength_um);
+      if (x < padL - 1 || x > padL + plotW + 1) continue;
+      const k = kindOf(m);
+      let y;
+      if (k === "valid" || k === "valid_flagged") {
+        if (useLog && !(m.flux_mjy > 0)) { hiddenNonPos++; continue; }
+        y = yOf(m.flux_mjy);
+        ctx.strokeStyle = col; ctx.lineWidth = 1;
+        if (k === "valid_flagged") ctx.setLineDash([2, 2]);
+        ctx.beginPath(); ctx.moveTo(x, yOf(m.flux_mjy - m.flux_err_mjy)); ctx.lineTo(x, yOf(m.flux_mjy + m.flux_err_mjy)); ctx.stroke();
+        ctx.setLineDash([]);
+        markerPath(ctx, shape, x, y, 3.3);
+        if (k === "valid") { ctx.fillStyle = col; ctx.fill(); ctx.strokeStyle = "rgba(0,0,0,0.55)"; ctx.stroke(); }
+        else { ctx.fillStyle = "#0b0f17"; ctx.fill(); ctx.strokeStyle = col; ctx.lineWidth = 1.5; ctx.stroke(); ctx.lineWidth = 1; }
+      } else if (k === "limit") {
+        if (useLog && !(m.upper_limit_mjy > 0)) { hiddenNonPos++; continue; }
+        y = yOf(m.upper_limit_mjy);
+        ctx.strokeStyle = col; ctx.lineWidth = 1.2; ctx.beginPath();
+        ctx.moveTo(x - 4, y); ctx.lineTo(x + 4, y); ctx.moveTo(x, y); ctx.lineTo(x, y + 12);
+        ctx.moveTo(x - 3, y + 8); ctx.lineTo(x, y + 12); ctx.lineTo(x + 3, y + 8); ctx.stroke();
+        ctx.lineWidth = 1;
+      } else {
+        y = padT + plotH - 6;               // no flux: marked on the baseline, never given a value
+        ctx.strokeStyle = m.state === "saturated" ? "#ff6b6b" : "#777";
+        ctx.beginPath(); ctx.moveTo(x - 3, y - 3); ctx.lineTo(x + 3, y + 3); ctx.moveTo(x + 3, y - 3); ctx.lineTo(x - 3, y + 3); ctx.stroke();
+      }
+      st.hoverPoints.push({ x, y, m });
+    }
+    if (!visible.length) {
+      ctx.fillStyle = "#8b96ab";
+      ctx.fillText("Nothing to show with the current epoch and quality selection.", padL + 10, padT + plotH / 2);
+    }
+
+    // --- caption: what a point is, and what is missing
+    const counts = { valid: 0, valid_flagged: 0, limit: 0, noflux: 0 };
+    for (const m of visible) counts[kindOf(m)]++;
+    const allCounts = { valid: 0, valid_flagged: 0, limit: 0, noflux: 0 };
+    for (const m of ms) if (st.selectedEpochs.set.has(m.epoch_index)) allCounts[kindOf(m)]++;
+    const missing = SPHEREX_BANDS.map((b) => b[0]).filter((d) => !present.has(d));
+    const spans = s.epochs.map((e, i) => `E${i + 1} ${(e.mjd_max - e.mjd_min).toFixed(1)} d`).join(", ");
+    const parts = [
+      `Each point is ONE exposure measured on native pixels at its own wavelength; nothing is coadded, averaged or merged across exposures, epochs or detectors.`,
+      `An epoch is a cluster of exposures taken over a span of time (${spans}), not one instant; colour shows the epoch, not a single time.`,
+      `Shown: ${counts.valid} valid, ${counts.valid_flagged} flagged${showFlagged ? "" : ` (hidden: ${allCounts.valid_flagged})`}, ${counts.limit} upper limits${showLimits ? "" : ` (hidden: ${allCounts.limit})`}, ${counts.noflux} without flux${showNoflux ? "" : ` (hidden: ${allCounts.noflux})`}.`,
+      `Detectors with data: ${[...present].sort().join(", ") || "none"}.` +
+        (missing.length ? ` No exposures in this search for ${missing.join(", ")}: hatched bands are coverage gaps, not zero flux.` : ""),
+      `Flux scale: ${useLog ? "log" : "linear"}${stScaleSelect.value === "auto" ? ` (auto; plotted dynamic range ${dynRange.toFixed(1)}×)` : ""}.` +
+        (hiddenNonPos ? ` ${hiddenNonPos} point(s) with F ≤ 0 cannot be drawn on a log scale (switch to linear).` : ""),
+    ];
+    if (stShowModel.checked) parts.push(modelDrawn
+      ? `Dashed lines: MODEL GUIDE only, each detector's shared-shape fit a_e·S(λ) per epoch (no per-epoch tilt), drawn only over the fitted wavelength range; faint where the model does not describe the source.`
+      : `Model guide: no detector had enough data for the shared-shape fit.`);
+    stSedCaption.textContent = parts.join(" ");
+  }
+
+  function stTooltipHtml(m) {
+    const ep = stSource().epochs.find((e) => e.index === m.epoch_index);
+    const rows = [
+      ["Detector", m.detector],
+      ["Epoch", `${m.epoch_index != null ? m.epoch_index + 1 : "?"}${ep ? ` (${fmtDate(ep.mjd_min)}…${fmtDate(ep.mjd_max)})` : ""}`],
+      ["Time", Number.isFinite(m.time_mjd) ? `MJD ${m.time_mjd.toFixed(4)} (${fmtDate(m.time_mjd)})` : "?"],
+      ["λ", m.wavelength_um != null ? `${m.wavelength_um.toFixed(4)} µm` : "?"],
+      ["Δλ", m.bandwidth_um != null ? `${m.bandwidth_um.toFixed(4)} µm` : "?"],
+    ];
+    if (m.state === "below_threshold" && m.upper_limit_mjy != null) {
+      rows.push(["Flux", `< ${fmtFlux(m.upper_limit_mjy)} mJy (3σ upper limit)`]);
+      if (m.flux_mjy != null) rows.push(["Measured", `${fmtFlux(m.flux_mjy)} ± ${fmtFlux(m.flux_err_mjy)} mJy`]);
+    } else if (m.flux_mjy != null) {
+      rows.push(["Flux", `${fmtFlux(m.flux_mjy)} ± ${fmtFlux(m.flux_err_mjy)} mJy`]);
+    } else {
+      rows.push(["Flux", "none"]);
+    }
+    rows.push(["S/N", m.snr != null && Number.isFinite(m.snr) ? m.snr.toFixed(1) : "—"]);
+    rows.push(["Quality", STATE_TEXT[m.state] || m.state]);
+    rows.push(["Flags", (m.flags_in_aperture || []).join(", ") || "none"]);
+    rows.push(["obs_id", m.obs_id]);
+    const esc = (v) => String(v).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+    return rows.map(([k, v]) => `<div><span class="st-tt-k">${esc(k)}</span> ${esc(v)}</div>`).join("");
   }
 
   stSedCanvas.addEventListener("mousemove", (ev) => {
     const r = stSedCanvas.getBoundingClientRect();
-    const x = ((ev.clientX - r.left) / r.width) * stSedCanvas.width, y = ((ev.clientY - r.top) / r.height) * stSedCanvas.height;
-    let best = null, bd = 10;
+    const sx = stSedCanvas.width / r.width, sy = stSedCanvas.height / r.height;
+    const x = (ev.clientX - r.left) * sx, y = (ev.clientY - r.top) * sy;
+    let best = null, bd = 9 * sx;
     for (const p of st.hoverPoints) {
       const dd = Math.hypot(p.x - x, p.y - y);
       if (dd < bd) { bd = dd; best = p; }
     }
-    stHover.textContent = best ? describeMeasurement(best.m) : "Hover a point to see its measurement.";
+    if (!best) {
+      stTooltip.hidden = true;
+      stHover.textContent = "Hover a point to see its measurement.";
+      return;
+    }
+    stHover.textContent = describeMeasurement(best.m);
+    stTooltip.innerHTML = stTooltipHtml(best.m);
+    stTooltip.hidden = false;
+    const wrap = stSedCanvas.parentElement.getBoundingClientRect();
+    const px = best.x / sx + (r.left - wrap.left), py = best.y / sy + (r.top - wrap.top);
+    const tw = stTooltip.offsetWidth, th = stTooltip.offsetHeight;
+    stTooltip.style.left = `${px + 12 + tw > wrap.width ? Math.max(0, px - 12 - tw) : px + 12}px`;
+    stTooltip.style.top = `${Math.max(0, Math.min(py - th / 2, wrap.height - th))}px`;
   });
+  stSedCanvas.addEventListener("mouseleave", () => { stTooltip.hidden = true; });
+  for (const c of [stRangeSelect, stScaleSelect, stShowFlagged, stShowLimits, stShowNoflux, stShowModel]) {
+    c.addEventListener("change", () => { const s = stSource(); if (s) drawSed(s); });
+  }
 
   function describeMeasurement(m) {
     const f = m.flux_mjy == null ? "no flux"

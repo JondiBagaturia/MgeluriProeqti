@@ -150,6 +150,7 @@
       <h2>Tracked sources <span class="status-text">(automatic detection, tracking and catalogue comparison for the detector shown; made for human inspection, not discovery claims)</span></h2>
       <div class="analysis-toolbar">
         <label><input id="show-tracks-checkbox" type="checkbox" checked> Mark tracked sources on the image</label>
+        <label title="Raw: the Phase Two score. Calibrated: the same weights, with motion and variability calibrated against peers of similar S/N and coverage, the catalogue term gated by local catalogue completeness, and quality caps.">Order by <select id="rank-order-select"><option value="calibrated" selected>Calibrated score</option><option value="raw">Raw score (Phase 2)</option></select></label>
         <button type="button" id="export-json-btn" disabled>Export JSON</button>
         <button type="button" id="export-csv-btn" disabled>Export CSV</button>
       </div>
@@ -160,7 +161,8 @@
           <thead>
             <tr>
               <th>#</th><th title="catalogued = uniquely matched to Gaia/CatWISE; candidate = worth a look; uncertain = measurement not trustworthy">Status</th>
-              <th title="0-1, weighted motion + variability + missing catalogue counterpart. Not a probability.">Anomaly</th>
+              <th title="Phase Two score: 0.45 motion + 0.30 variability + 0.25 no catalogue counterpart. Not a probability.">Raw</th>
+              <th title="Same weights; motion/variability calibrated against peers of similar S/N and coverage, catalogue term only when the source is above local catalogue completeness, capped for quality problems. Not a probability. ▼ = reduced or capped (see the detail panel).">Calibrated</th>
               <th title="How far the measurement itself can be trusted">Reliability</th>
               <th title="Median detection signal-to-noise">S/N</th><th>Epochs</th><th>Proper motion</th>
               <th title="Probability of the measured scatter if the flux were constant (6% systematic error included)">Variability</th>
@@ -179,9 +181,21 @@
       <div id="st-body" hidden>
         <label>Source <select id="st-source-select"></select></label>
         <h3>Spectrum by epoch</h3>
-        <p class="status-text">F<sub>ν</sub> in mJy (r = 9″ aperture, not aperture-corrected). One panel per detector: the gap between detectors is not observed. Filled = valid; hollow = valid but a saturation-related flag is in the aperture; arrow = 3σ upper limit; × on the baseline = no flux (red: saturated). Coloured bars under each panel: wavelengths actually sampled per epoch. Points of one epoch were taken over several days; only dichroic pairs (D1/D4, D2/D5, D3/D6) are simultaneous. No line is drawn between points.</p>
+        <p class="status-text">F<sub>ν</sub> in mJy (r = 9″ aperture, not aperture-corrected), every detector on one wavelength axis. Colour = epoch; marker shape = detector (● D1, ■ D2, ◆ D3, ▲ D4, ⬢ D5, ★ D6). Filled = valid with ±1σ bar; hollow with dashed bar = valid but a saturation-related flag is in the aperture; arrow = 3σ upper limit; × on the baseline = no flux (red: saturated). Shaded columns = nominal detector bands; hatched = no exposures from that detector in this search. Strips under the axis: wavelengths actually sampled per epoch. Only dichroic pairs (D1/D4, D2/D5, D3/D6) are simultaneous. No line joins the points.</p>
+        <div class="st-controls">
+          <label>Wavelength range <select id="st-range-select"><option value="full" selected>Full SPHEREx range (0.75–5.0 µm)</option><option value="observed">Observed range</option></select></label>
+          <label>Flux scale <select id="st-scale-select"><option value="auto" selected>Auto (log if range &gt; 5×)</option><option value="linear">Linear</option><option value="log">Log</option></select></label>
+          <label><input id="st-show-flagged" type="checkbox" checked> Flagged points</label>
+          <label><input id="st-show-limits" type="checkbox" checked> Upper limits</label>
+          <label><input id="st-show-noflux" type="checkbox" checked> No-flux exposures</label>
+          <label title="Each detector's shared-shape fit a_e·S(λ) per epoch, from the change statistics below. A guide only: the points are the data."><input id="st-show-model" type="checkbox"> Model guide (dashed)</label>
+        </div>
         <div id="st-epoch-boxes" class="st-epoch-boxes"></div>
-        <canvas id="st-sed-canvas" width="900" height="260"></canvas>
+        <div class="st-sed-wrap">
+          <canvas id="st-sed-canvas" width="960" height="380"></canvas>
+          <div id="st-tooltip" class="st-tooltip" hidden></div>
+        </div>
+        <p id="st-sed-caption" class="status-text"></p>
         <p id="st-hover" class="status-text">Hover a point to see its measurement.</p>
         <h3>Light curves by detector</h3>
         <canvas id="st-lc-canvas" width="900" height="240"></canvas>

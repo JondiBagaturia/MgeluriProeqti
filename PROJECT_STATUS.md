@@ -74,9 +74,15 @@ statistics. See docs/PHASE3.md §8 for what was deferred, including the CWAVE/CB
 calibration, ePSF photometry, more detectors per target, a within-epoch variability metric
 and an external IRSA comparison.
 
+Done in Phase Three, Priority 2 (uncommitted, under review): a calibrated score alongside
+the raw one. Motion and variability are calibrated against peers of similar S/N and coverage,
+the catalogue term is gated by local Gaia/CatWISE completeness, and quality caps apply.
+Validated by synthetic injection into real cutouts. See docs/RANKING.md, which keeps the
+injection results and the real-data regression separate.
+
 Still open from Phase Two:
-1. Anomaly scores normalised against sources of similar brightness, coverage and quality,
-   plus a synthetic-injection false-positive study.
+1. (Priority 2, see above. Open: completeness is often not estimable on real fields;
+   the RW Aur D6 variability systematic.)
 2. Per-exposure Gaia registration and a PSF model inside shift-and-stack; honest velocity
    errors.
 3. Parallax once SPHEREx provides at least 4–6 epochs per field.

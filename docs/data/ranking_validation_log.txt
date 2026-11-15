@@ -1,0 +1,100 @@
+barnard: S/N per mJy {'D6': 7.36, 'D3': 3.28}; 10 clean positions; 33 injection runs, 288 source-detector cases; 345s
+eps_ind_b: S/N per mJy {'D6': 12.81, 'D3': 13.0}; 24 clean positions; 33 injection runs, 444 source-detector cases; 417s
+wise0855: S/N per mJy {'D6': 12.93, 'D5': 21.78}; 40 clean positions; 32 injection runs, 440 source-detector cases; 301s
+rw_aur: S/N per mJy {'D6': 8.88, 'D3': 18.11}; 4 clean positions; 33 injection runs, 186 source-detector cases; 362s
+r_dra: pilot not recovered in ['D6', 'D3']; skipped
+
+== stationary
+  S/N~ 6: injected 96, recovered(>=2 ep) 0.16, measured S/N 7.571797847747803
+     thr 0.1: raw 1.0  calibrated 0.26666666666666666  | M/V-driven raw 0.13333333333333333 cal 0.13333333333333333
+     thr 0.2: raw 1.0  calibrated 0.13333333333333333  | M/V-driven raw 0.13333333333333333 cal 0.13333333333333333
+     thr 0.3: raw 0.13333333333333333  calibrated 0.13333333333333333  | M/V-driven raw 0.13333333333333333 cal 0.13333333333333333
+     thr 0.4: raw 0.13333333333333333  calibrated 0.0  | M/V-driven raw 0.0 cal 0.0
+     completeness regimes {'below_completeness': {'n': 9, 'raw_C_positive': 9, 'calibrated_C_positive': 0}, 'completeness_unknown': {'n': 6, 'raw_C_positive': 6, 'calibrated_C_positive': 6}}; flags {'near_bright_star': 0, 'two_epochs_only': 12, 'ambiguous_link': 0}
+  S/N~10: injected 288, recovered(>=2 ep) 0.93, measured S/N 10.219359397888184
+     thr 0.1: raw 0.9405204460966543  calibrated 0.4163568773234201  | M/V-driven raw 0.022304832713754646 cal 0.022304832713754646
+     thr 0.2: raw 0.9405204460966543  calibrated 0.03345724907063197  | M/V-driven raw 0.022304832713754646 cal 0.022304832713754646
+     thr 0.3: raw 0.03717472118959108  calibrated 0.022304832713754646  | M/V-driven raw 0.022304832713754646 cal 0.022304832713754646
+     thr 0.4: raw 0.022304832713754646  calibrated 0.022304832713754646  | M/V-driven raw 0.0 cal 0.0
+     completeness regimes {'below_completeness': {'n': 148, 'raw_C_positive': 148, 'calibrated_C_positive': 0}, 'completeness_unknown': {'n': 120, 'raw_C_positive': 120, 'calibrated_C_positive': 120}, 'above_completeness': {'n': 1, 'raw_C_positive': 1, 'calibrated_C_positive': 1}}; flags {'near_bright_star': 0, 'two_epochs_only': 49, 'ambiguous_link': 0}
+  S/N~20: injected 288, recovered(>=2 ep) 0.91, measured S/N 19.90073585510254
+     thr 0.1: raw 0.9157088122605364  calibrated 0.4061302681992337  | M/V-driven raw 0.01532567049808429 cal 0.01532567049808429
+     thr 0.2: raw 0.9157088122605364  calibrated 0.019157088122605363  | M/V-driven raw 0.0 cal 0.0
+     thr 0.3: raw 0.019157088122605363  calibrated 0.0  | M/V-driven raw 0.0 cal 0.0
+     thr 0.4: raw 0.0  calibrated 0.0  | M/V-driven raw 0.0 cal 0.0
+     completeness regimes {'below_completeness': {'n': 144, 'raw_C_positive': 144, 'calibrated_C_positive': 0}, 'above_completeness': {'n': 2, 'raw_C_positive': 2, 'calibrated_C_positive': 2}, 'completeness_unknown': {'n': 115, 'raw_C_positive': 115, 'calibrated_C_positive': 115}}; flags {'near_bright_star': 0, 'two_epochs_only': 4, 'ambiguous_link': 0}
+  S/N~50: injected 288, recovered(>=2 ep) 0.88, measured S/N 49.680763244628906
+     thr 0.1: raw 0.932806324110672  calibrated 0.8023715415019763  | M/V-driven raw 0.0 cal 0.0
+     thr 0.2: raw 0.932806324110672  calibrated 0.003952569169960474  | M/V-driven raw 0.0 cal 0.0
+     thr 0.3: raw 0.003952569169960474  calibrated 0.0  | M/V-driven raw 0.0 cal 0.0
+     thr 0.4: raw 0.0  calibrated 0.0  | M/V-driven raw 0.0 cal 0.0
+     completeness regimes {'below_completeness': {'n': 34, 'raw_C_positive': 34, 'calibrated_C_positive': 0}, 'completeness_unknown': {'n': 219, 'raw_C_positive': 219, 'calibrated_C_positive': 219}}; flags {'near_bright_star': 0, 'two_epochs_only': 2, 'ambiguous_link': 0}
+
+== moving
+  S/N~10: injected 64, recovered(>=2 ep) 0.80, measured S/N 10.267062187194824
+     thr 0.1: raw 0.9607843137254902  calibrated 0.7843137254901961
+     thr 0.2: raw 0.9411764705882353  calibrated 0.35294117647058826
+     thr 0.3: raw 0.47058823529411764  calibrated 0.27450980392156865
+     thr 0.4: raw 0.37254901960784315  calibrated 0.19607843137254902
+     component ge_0.1: raw 0.5098039215686274 cal 0.49019607843137253  ge_0.3: raw 0.37254901960784315 cal 0.37254901960784315  ge_0.5: raw 0.29411764705882354 cal 0.29411764705882354
+     completeness regimes {'below_completeness': {'n': 21, 'raw_C_positive': 21, 'calibrated_C_positive': 0}, 'above_completeness': {'n': 1, 'raw_C_positive': 1, 'calibrated_C_positive': 1}, 'completeness_unknown': {'n': 29, 'raw_C_positive': 29, 'calibrated_C_positive': 29}}; flags {'near_bright_star': 0, 'two_epochs_only': 14, 'ambiguous_link': 0}
+  S/N~20: injected 64, recovered(>=2 ep) 0.80, measured S/N 20.029741287231445
+     thr 0.1: raw 0.9607843137254902  calibrated 0.7843137254901961
+     thr 0.2: raw 0.9607843137254902  calibrated 0.5294117647058824
+     thr 0.3: raw 0.6666666666666666  calibrated 0.37254901960784315
+     thr 0.4: raw 0.47058823529411764  calibrated 0.29411764705882354
+     component ge_0.1: raw 0.6470588235294118 cal 0.6470588235294118  ge_0.3: raw 0.5098039215686274 cal 0.5098039215686274  ge_0.5: raw 0.39215686274509803 cal 0.39215686274509803
+     completeness regimes {'below_completeness': {'n': 24, 'raw_C_positive': 24, 'calibrated_C_positive': 0}, 'completeness_unknown': {'n': 27, 'raw_C_positive': 27, 'calibrated_C_positive': 27}}; flags {'near_bright_star': 0, 'two_epochs_only': 2, 'ambiguous_link': 0}
+  S/N~50: injected 64, recovered(>=2 ep) 0.75, measured S/N 49.96837043762207
+     thr 0.1: raw 0.9791666666666666  calibrated 0.875
+     thr 0.2: raw 0.9583333333333334  calibrated 0.6458333333333334
+     thr 0.3: raw 0.7291666666666666  calibrated 0.5208333333333334
+     thr 0.4: raw 0.5833333333333334  calibrated 0.4166666666666667
+     component ge_0.1: raw 0.7708333333333334 cal 0.7708333333333334  ge_0.3: raw 0.6041666666666666 cal 0.6041666666666666  ge_0.5: raw 0.5 cal 0.5
+     completeness regimes {'below_completeness': {'n': 8, 'raw_C_positive': 8, 'calibrated_C_positive': 0}, 'completeness_unknown': {'n': 40, 'raw_C_positive': 40, 'calibrated_C_positive': 40}}; flags {'near_bright_star': 0, 'two_epochs_only': 0, 'ambiguous_link': 0}
+
+== variable
+  S/N~10: injected 32, recovered(>=2 ep) 0.75, measured S/N 10.202106237411499
+     thr 0.1: raw 0.9583333333333334  calibrated 0.4583333333333333
+     thr 0.2: raw 0.9583333333333334  calibrated 0.041666666666666664
+     thr 0.3: raw 0.041666666666666664  calibrated 0.0
+     thr 0.4: raw 0.041666666666666664  calibrated 0.0
+     component ge_0.1: raw 0.041666666666666664 cal 0.041666666666666664  ge_0.3: raw 0.0 cal 0.0  ge_0.5: raw 0.0 cal 0.0
+     completeness regimes {'below_completeness': {'n': 14, 'raw_C_positive': 14, 'calibrated_C_positive': 0}, 'completeness_unknown': {'n': 10, 'raw_C_positive': 10, 'calibrated_C_positive': 10}}; flags {'near_bright_star': 0, 'two_epochs_only': 14, 'ambiguous_link': 0}
+  S/N~20: injected 32, recovered(>=2 ep) 0.84, measured S/N 19.087599754333496
+     thr 0.1: raw 1.0  calibrated 0.48148148148148145
+     thr 0.2: raw 0.9629629629629629  calibrated 0.2962962962962963
+     thr 0.3: raw 0.8518518518518519  calibrated 0.0
+     thr 0.4: raw 0.0  calibrated 0.0
+     component ge_0.1: raw 0.9629629629629629 cal 0.9629629629629629  ge_0.3: raw 0.48148148148148145 cal 0.48148148148148145  ge_0.5: raw 0.0 cal 0.0
+     completeness regimes {'below_completeness': {'n': 14, 'raw_C_positive': 14, 'calibrated_C_positive': 0}, 'completeness_unknown': {'n': 13, 'raw_C_positive': 13, 'calibrated_C_positive': 13}}; flags {'near_bright_star': 0, 'two_epochs_only': 2, 'ambiguous_link': 0}
+  S/N~50: injected 32, recovered(>=2 ep) 1.00, measured S/N 46.775672912597656
+     thr 0.1: raw 1.0  calibrated 0.75
+     thr 0.2: raw 0.9375  calibrated 0.5625
+     thr 0.3: raw 0.9375  calibrated 0.125
+     thr 0.4: raw 0.125  calibrated 0.0625
+     component ge_0.1: raw 1.0 cal 1.0  ge_0.3: raw 0.96875 cal 0.84375  ge_0.5: raw 0.125 cal 0.125
+     completeness regimes {'below_completeness': {'n': 8, 'raw_C_positive': 8, 'calibrated_C_positive': 0}, 'completeness_unknown': {'n': 24, 'raw_C_positive': 24, 'calibrated_C_positive': 24}}; flags {'near_bright_star': 0, 'two_epochs_only': 0, 'ambiguous_link': 0}
+
+== near_bright
+  S/N~10: injected 14, recovered(>=2 ep) 0.21, measured S/N 10.199507236480713
+     thr 0.1: raw 1.0  calibrated 0.6666666666666666  | M/V-driven raw 0.0 cal 0.0
+     thr 0.2: raw 1.0  calibrated 0.0  | M/V-driven raw 0.0 cal 0.0
+     thr 0.3: raw 0.3333333333333333  calibrated 0.0  | M/V-driven raw 0.0 cal 0.0
+     thr 0.4: raw 0.0  calibrated 0.0  | M/V-driven raw 0.0 cal 0.0
+     completeness regimes {'below_completeness': {'n': 1, 'raw_C_positive': 1, 'calibrated_C_positive': 0}, 'completeness_unknown': {'n': 2, 'raw_C_positive': 2, 'calibrated_C_positive': 2}}; flags {'near_bright_star': 1, 'two_epochs_only': 0, 'ambiguous_link': 0}
+
+== sparse_stationary
+  S/N~10: injected 48, recovered(>=2 ep) 0.85, measured S/N 10.381370544433594
+     thr 0.1: raw 0.8536585365853658  calibrated 0.6829268292682927  | M/V-driven raw 0.04878048780487805 cal 0.04878048780487805
+     thr 0.2: raw 0.8536585365853658  calibrated 0.04878048780487805  | M/V-driven raw 0.04878048780487805 cal 0.04878048780487805
+     thr 0.3: raw 0.04878048780487805  calibrated 0.04878048780487805  | M/V-driven raw 0.04878048780487805 cal 0.04878048780487805
+     thr 0.4: raw 0.04878048780487805  calibrated 0.04878048780487805  | M/V-driven raw 0.0 cal 0.0
+     completeness regimes {'below_completeness': {'n': 7, 'raw_C_positive': 7, 'calibrated_C_positive': 0}, 'completeness_unknown': {'n': 34, 'raw_C_positive': 34, 'calibrated_C_positive': 34}}; flags {'near_bright_star': 0, 'two_epochs_only': 6, 'ambiguous_link': 0}
+  S/N~50: injected 48, recovered(>=2 ep) 0.94, measured S/N 50.52142333984375
+     thr 0.1: raw 0.8444444444444444  calibrated 0.7333333333333333  | M/V-driven raw 0.0 cal 0.0
+     thr 0.2: raw 0.8444444444444444  calibrated 0.06666666666666667  | M/V-driven raw 0.0 cal 0.0
+     thr 0.3: raw 0.0  calibrated 0.0  | M/V-driven raw 0.0 cal 0.0
+     thr 0.4: raw 0.0  calibrated 0.0  | M/V-driven raw 0.0 cal 0.0
+     completeness regimes {'completeness_unknown': {'n': 33, 'raw_C_positive': 33, 'calibrated_C_positive': 33}, 'below_completeness': {'n': 5, 'raw_C_positive': 5, 'calibrated_C_positive': 0}, 'above_completeness': {'n': 7, 'raw_C_positive': 7, 'calibrated_C_positive': 7}}; flags {'near_bright_star': 0, 'two_epochs_only': 2, 'ambiguous_link': 0}
+wrote D:\Swavlai\programebi\Claude\Nasa\python\MgeluriProeqti\docs\data\ranking_validation.json
