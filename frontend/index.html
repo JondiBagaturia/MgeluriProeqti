@@ -4,28 +4,54 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SPHEREx Blink</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Almendra:ital,wght@0,400;0,700;1,400&display=swap">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<header class="topbar">
-  <h1>SPHEREx Blink</h1>
-  <p class="tagline">Blink NASA SPHEREx epochs at any sky position to spot moving or variable objects — inspired by <a href="http://byw.tools/wiseview" target="_blank" rel="noopener">WiseView</a>.</p>
+
+<!-- The sky is the world; the interface is a set of game-menu windows laid
+     over it, one per screen edge. A window shows while the cursor is near
+     its edge, while it is pinned, or in "menu mode" (right-click the sky).
+     See ui_chrome.js. -->
+<main id="stage">
+  <canvas id="viewer-canvas" width="400" height="400"></canvas>
+  <div id="crosshair" hidden aria-hidden="true"></div>
+  <div id="empty-state" class="empty-state window">
+    Enter a position above (try "Barnard's star", "WISE J085510.83-071442.5", or "269.452 4.693") and press Go.
+  </div>
+</main>
+
+<div id="pixel-readout" class="pixel-readout"></div>
+
+<div id="progress-wrap" hidden>
+  <div id="progress-bar"></div>
+  <span id="progress-text"></span>
+</div>
+
+<header class="dock dock-top" data-edge="top">
+  <form id="search-form" class="search-bar window">
+    <input id="position-input" type="text" placeholder="RA/Dec (08h55m10.8s -07d14m42.5s or 269.452 4.693) or an object name" autocomplete="off" aria-label="Sky position or object name">
+    <button type="submit" id="go-btn" class="text-btn">Go</button>
+  </form>
+  <p id="resolve-status" class="status-text"></p>
 </header>
 
-<form id="search-form" class="search-bar">
-  <input id="position-input" type="text" placeholder="RA/Dec (08h55m10.8s -07d14m42.5s or 269.452 4.693) or an object name" autocomplete="off">
-  <button type="submit" id="go-btn">Go</button>
-  <span id="resolve-status" class="status-text"></span>
-</form>
+<aside class="dock dock-left window" data-edge="left" id="controls">
+  <div class="titlebar">
+    <h1 class="title">SPHEREx Blink</h1>
+    <button type="button" class="pin-btn" data-pin="left" aria-pressed="false" title="Keep this window open" aria-label="Keep this window open"></button>
+  </div>
+  <div class="window-body">
+    <p class="status-text intro">Blink NASA SPHEREx epochs at any sky position to spot moving or variable objects. Inspired by <a href="http://byw.tools/wiseview" target="_blank" rel="noopener">WiseView</a>.</p>
 
-<div class="layout">
-  <aside class="controls" id="controls">
     <section>
-      <h2>Search</h2>
-      <label>Field of view: <span id="fov-value">5′</span>
+      <h2>Search area</h2>
+      <label>Field of view <span id="fov-value">5′</span>
         <input id="fov-slider" type="range" min="1" max="30" step="0.5" value="5">
       </label>
-      <p id="fov-warning" class="warning" hidden>Large FOV — this will be slower.</p>
+      <p id="fov-warning" class="warning" hidden>Large field of view. This will be slower.</p>
 
       <label>Grouping
         <select id="mode-select">
@@ -37,22 +63,22 @@
 
       <fieldset id="detector-fieldset">
         <legend>Detectors</legend>
-        <label><input type="checkbox" value="D1"> D1 (0.75–1.09 µm)</label>
-        <label><input type="checkbox" value="D2" checked> D2 (1.10–1.62 µm)</label>
-        <label><input type="checkbox" value="D3"> D3 (1.63–2.41 µm)</label>
-        <label><input type="checkbox" value="D4"> D4 (2.42–3.82 µm)</label>
-        <label><input type="checkbox" value="D5"> D5 (3.83–4.41 µm)</label>
-        <label><input type="checkbox" value="D6" checked> D6 (4.42–5.00 µm)</label>
+        <label><input type="checkbox" value="D1"><b>D1</b> 0.75–1.09 µm</label>
+        <label><input type="checkbox" value="D2" checked><b>D2</b> 1.10–1.62 µm</label>
+        <label><input type="checkbox" value="D3"><b>D3</b> 1.63–2.41 µm</label>
+        <label><input type="checkbox" value="D4"><b>D4</b> 2.42–3.82 µm</label>
+        <label><input type="checkbox" value="D5"><b>D5</b> 3.83–4.41 µm</label>
+        <label><input type="checkbox" value="D6" checked><b>D6</b> 4.42–5.00 µm</label>
       </fieldset>
 
       <label>Quality <span id="quality-value">Mid (balanced)</span>
         <input id="quality-slider" type="range" min="0" max="2" value="1" step="1">
       </label>
-      <p class="status-text">Caps exposures combined per epoch (fewer = faster to fetch, slightly noisier). Low=~5, Mid=~15, High=all available — spread evenly across the epoch's time span either way.</p>
+      <p class="status-text">Caps exposures combined per epoch (fewer = faster to fetch, slightly noisier). Low is about 5, Mid about 15, High is all available, spread evenly across the epoch's time span either way.</p>
     </section>
 
     <section>
-      <h2>Discovery</h2>
+      <h2>Compare</h2>
       <label>View
         <select id="view-mode-select">
           <option value="blink" selected>Blink</option>
@@ -82,25 +108,33 @@
       <label>White point <span id="white-value"></span>
         <input id="white-slider" type="range" min="0" max="100" value="99" step="0.5">
       </label>
-      <p id="asinh-note" class="status-text" hidden>Asinh uses fixed levels (median / 99.8th percentile, computed across the whole loaded sequence) — the black/white sliders are inactive in this mode.</p>
-      <label><input id="invert-checkbox" type="checkbox"> Invert</label>
-      <label>Zoom <span id="zoom-value">8×</span>
-        <input id="zoom-slider" type="range" min="1" max="32" value="8" step="1">
+      <p id="asinh-note" class="status-text" hidden>Asinh uses fixed levels (median / 99.8th percentile, computed across the whole loaded sequence). The black and white sliders are inactive in this mode.</p>
+      <label>Zoom <span id="zoom-value">1×</span>
+        <input id="zoom-slider" type="range" min="1" max="8" value="1" step="0.25">
       </label>
+      <label class="check"><input id="fill-checkbox" type="checkbox"> Fill the screen (crops the field)</label>
+      <label class="check"><input id="invert-checkbox" type="checkbox"> Invert</label>
+    </section>
+  </div>
+</aside>
+
+<aside class="dock dock-right window" data-edge="right">
+  <div class="titlebar">
+    <h2 class="title">Measurements</h2>
+    <button type="button" class="pin-btn" data-pin="right" aria-pressed="false" title="Keep this window open" aria-label="Keep this window open"></button>
+  </div>
+  <div class="window-body">
+    <section>
+      <h2>Light curve</h2>
+      <canvas id="lightcurve-canvas" width="288" height="120"></canvas>
+      <p class="status-text">Flux at the target pixel, per frame. Not aperture photometry; see README.</p>
     </section>
 
     <section>
-      <h2>Spectrum <span class="status-text">(bonus)</span></h2>
-      <p class="status-text">Click a pixel in the viewer for flux vs wavelength at that exact position, across all 6 detectors — forced photometry at one pixel, not PSF-fitted. Slow: it re-queries IRSA for that position.</p>
-      <canvas id="spectrum-canvas" width="260" height="120"></canvas>
+      <h2>Spectrum</h2>
+      <canvas id="spectrum-canvas" width="288" height="120"></canvas>
       <p id="spectrum-status" class="status-text"></p>
-      <p class="status-text">Compare with IRSA's <a href="https://irsa.ipac.caltech.edu/applications/spherex/tool-spectrophotometry" target="_blank" rel="noopener">official Spectrophotometry Tool</a>.</p>
-    </section>
-
-    <section>
-      <h2>Cache</h2>
-      <p id="cache-status" class="status-text">—</p>
-      <button type="button" id="clear-cache-btn">Clear cache</button>
+      <p class="status-text">Click a pixel in the image for flux vs wavelength at that exact position, across all 6 detectors. Forced photometry at one pixel, not PSF-fitted. Slow: it re-queries IRSA for that position. Compare with IRSA's <a href="https://irsa.ipac.caltech.edu/applications/spherex/tool-spectrophotometry" target="_blank" rel="noopener">official Spectrophotometry Tool</a>.</p>
     </section>
 
     <section>
@@ -108,47 +142,39 @@
       <label>Link <input id="share-url" type="text" readonly></label>
       <label>Embed <textarea id="embed-snippet" readonly rows="2"></textarea></label>
     </section>
-  </aside>
 
-  <main class="viewer-area">
-    <div id="progress-wrap" hidden>
-      <div id="progress-bar"></div>
-      <span id="progress-text"></span>
-    </div>
+    <section>
+      <h2>Cache</h2>
+      <p id="cache-status" class="status-text">—</p>
+      <button type="button" id="clear-cache-btn" class="text-btn">Clear cache</button>
+    </section>
 
-    <div id="canvas-wrap">
-      <canvas id="viewer-canvas" width="400" height="400"></canvas>
-      <div id="frame-label" class="frame-label"></div>
-      <div id="pixel-readout" class="pixel-readout"></div>
-      <div id="empty-state" class="empty-state">
-        Enter a position above (try "Barnard's star", "WISE J085510.83-071442.5", or "269.452 4.693") and press Go.
-      </div>
-    </div>
+    <p class="credits status-text">Data: NASA/IPAC Infrared Science Archive (IRSA), SPHEREx mission. Name resolution: SIMBAD, CDS Strasbourg.
+    This tool fetches public SPHEREx cutouts live from IRSA and stores nothing server-side; your browser caches
+    recently viewed frames locally purely to make repeat views faster.</p>
+  </div>
+</aside>
 
-    <div class="playback-bar">
-      <button type="button" id="step-back-btn" title="Previous frame (←)">⏮</button>
-      <button type="button" id="play-btn" title="Play/Pause (space)">▶</button>
-      <button type="button" id="step-fwd-btn" title="Next frame (→)">⏭</button>
-      <label>Speed <input id="speed-slider" type="range" min="1" max="10" value="4"></label>
-      <label><input id="loop-checkbox" type="checkbox" checked> Loop</label>
-      <label><input id="ab-checkbox" type="checkbox"> A/B flip</label>
-      <input id="frame-slider" type="range" min="0" max="0" value="0">
-    </div>
-
-    <div class="lightcurve-wrap">
-      <h2>Light curve <span class="status-text">(flux at the target pixel, per frame — not aperture photometry; see README)</span></h2>
-      <canvas id="lightcurve-canvas" width="900" height="140"></canvas>
-    </div>
-  </main>
-</div>
-
-<footer class="credits">
-  <p>Data: NASA/IPAC Infrared Science Archive (IRSA), SPHEREx mission. Name resolution: SIMBAD, CDS Strasbourg.
-  This tool fetches public SPHEREx cutouts live from IRSA and stores nothing server-side; your browser caches
-  recently viewed frames locally (see "Cache" panel) purely to make repeat views faster.</p>
+<footer class="dock dock-bottom" data-edge="bottom">
+  <div id="frame-label" class="frame-label window"></div>
+  <div class="playback-bar window">
+    <button type="button" id="step-back-btn" class="icon-btn" title="Previous frame (←)">⏮</button>
+    <button type="button" id="play-btn" class="icon-btn play" title="Play/Pause (space)">▶</button>
+    <button type="button" id="step-fwd-btn" class="icon-btn" title="Next frame (→)">⏭</button>
+    <input id="frame-slider" type="range" min="0" max="0" value="0" aria-label="Frame">
+    <label>Speed <input id="speed-slider" type="range" min="1" max="10" value="4"></label>
+    <label class="check"><input id="loop-checkbox" type="checkbox" checked> Loop</label>
+    <label class="check"><input id="ab-checkbox" type="checkbox"> A/B flip</label>
+    <button type="button" id="fullscreen-btn" class="icon-btn" title="Full screen" aria-label="Full screen"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="square" aria-hidden="true"><path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4"/></svg></button>
+    <button type="button" class="pin-btn" data-pin="bottom" aria-pressed="false" title="Keep this bar open" aria-label="Keep this bar open"></button>
+  </div>
 </footer>
+
+<div id="edge-hint" class="window" hidden>Move the cursor to an edge of the screen for its window. Right-click the sky to open them all.</div>
+<button type="button" id="chrome-toggle" class="icon-btn" title="Open or close the menus" aria-label="Open or close the menus">☰</button>
 
 <script src="idb_cache.js"></script>
 <script src="app.js"></script>
+<script src="ui_chrome.js"></script>
 </body>
 </html>

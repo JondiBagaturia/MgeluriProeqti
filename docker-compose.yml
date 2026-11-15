@@ -4,9 +4,5 @@ services:
     ports:
       - "8000:8000"
     restart: unless-stopped
-    # Which design is served at "/": classic (default) or fullscreen. Both
-    # are always available at /classic/ and /fullscreen/ (see README.md).
-    environment:
-      SPHEREX_FRONTEND: ${SPHEREX_FRONTEND:-classic}
     # No volumes: the backend is stateless by design (PLAN.md) — nothing
     # written to disk needs to survive a restart.

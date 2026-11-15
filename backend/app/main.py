@@ -6,14 +6,13 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import time
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, JSONResponse, RedirectResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
@@ -229,41 +228,6 @@ async def spectrum(
 # really does run the whole tool (per the brief's ops requirement). Mounted
 # last so it never shadows the /api/* routes above — Starlette matches
 # routes in registration order.
-#
-# Two interchangeable designs of the same viewer live side by side (see
-# "Switching the design" in README.md):
-#   frontend/             "classic"    - the original page layout
-#   frontend-fullscreen/  "fullscreen" - the image fills the window, the
-#                                        controls are auto-hiding windows
-# Both are always reachable at /classic/ and /fullscreen/. The
-# SPHEREX_FRONTEND environment variable picks which one is also served at
-# "/" (default: classic).
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-_FRONTEND_DIRS = {
-    "classic": _REPO_ROOT / "frontend",
-    "fullscreen": _REPO_ROOT / "frontend-fullscreen",
-}
-_default_frontend = os.environ.get("SPHEREX_FRONTEND", "classic").strip().lower()
-if _default_frontend not in _FRONTEND_DIRS:
-    log.warning(
-        "SPHEREX_FRONTEND=%r is not one of %s; serving 'classic' at /",
-        _default_frontend,
-        sorted(_FRONTEND_DIRS),
-    )
-    _default_frontend = "classic"
-
-
-
-def _redirect_to_trailing_slash(request: Request):
-    """/fullscreen?position=... -> /fullscreen/?position=... (the pages load
-    their scripts by relative path, so they need the trailing slash)."""
-    query = f"?{request.url.query}" if request.url.query else ""
-    return RedirectResponse(f"{request.url.path}/{query}")
-
-
-for _name, _dir in _FRONTEND_DIRS.items():
-    if _dir.is_dir():
-        app.add_api_route(f"/{_name}", _redirect_to_trailing_slash, include_in_schema=False)
-        app.mount(f"/{_name}", StaticFiles(directory=str(_dir), html=True), name=f"frontend-{_name}")
-if _FRONTEND_DIRS[_default_frontend].is_dir():
-    app.mount("/", StaticFiles(directory=str(_FRONTEND_DIRS[_default_frontend]), html=True), name="frontend")
+_FRONTEND_DIR = Path(__file__).resolve().parents[2] / "frontend"
+if _FRONTEND_DIR.is_dir():
+    app.mount("/", StaticFiles(directory=str(_FRONTEND_DIR), html=True), name="frontend")

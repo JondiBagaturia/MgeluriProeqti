@@ -67,8 +67,10 @@
   const spectrumCtx = spectrumCanvas.getContext("2d");
   const spectrumStatus = $("spectrum-status");
 
-  const offscreen = document.createElement("canvas");
-  const offscreenCtx = offscreen.getContext("2d");
+  const stage = $("stage");
+  const crosshair = $("crosshair");
+  const fillCheckbox = $("fill-checkbox");
+  const fullscreenBtn = $("fullscreen-btn");
 
   // ---------------------------------------------------------------------
   // State
@@ -85,6 +87,8 @@
     abPhase: 0,
     lastRenderedGrid: null, // {width, height, values: Float32Array (NaN = no data)}
     globalFiniteValues: null, // flat array across ALL loaded frames, for Asinh's fixed levels
+    searchGeneration: 0, // bumped by every new search; stale streams/retries check it and stop
+    retryTimer: null, // countdown to the next automatic attempt while the archive is down
   };
 
   // ---------------------------------------------------------------------
@@ -178,10 +182,41 @@
   });
   updateStretchControlsEnabled();
   invertCheckbox.addEventListener("change", renderView);
+  // The canvas holds exactly one canvas pixel per grid pixel; its on-screen
+  // size is pure CSS (crisp nearest-neighbour scaling via
+  // image-rendering: pixelated). Zoom 1× fits the whole field inside the
+  // window - or covers the window when "Fill the screen" is ticked - and
+  // higher zoom magnifies about the centre, which is always the target.
+  function layoutCanvas() {
+    const rect = stage.getBoundingClientRect();
+    const fit = fillCheckbox.checked ? Math.max(rect.width, rect.height) : Math.min(rect.width, rect.height);
+    const size = Math.round(fit * parseFloat(zoomSlider.value));
+    canvas.style.width = `${size}px`;
+    canvas.style.height = `${Math.round((size * canvas.height) / canvas.width)}px`;
+  }
   zoomSlider.addEventListener("input", () => {
     zoomValue.textContent = `${zoomSlider.value}×`;
-    renderView();
+    layoutCanvas();
   });
+  fillCheckbox.addEventListener("change", layoutCanvas);
+  window.addEventListener("resize", layoutCanvas);
+  stage.addEventListener(
+    "wheel",
+    (ev) => {
+      if (state.frames.length === 0) return;
+      ev.preventDefault();
+      const step = ev.deltaY < 0 ? 0.25 : -0.25;
+      const next = Math.min(parseFloat(zoomSlider.max), Math.max(parseFloat(zoomSlider.min), parseFloat(zoomSlider.value) + step));
+      zoomSlider.value = next;
+      zoomSlider.dispatchEvent(new Event("input"));
+    },
+    { passive: false }
+  );
+  fullscreenBtn.addEventListener("click", () => {
+    if (document.fullscreenElement) document.exitFullscreen();
+    else if (document.documentElement.requestFullscreen) document.documentElement.requestFullscreen().catch(() => {});
+  });
+  layoutCanvas();
   blackValue.textContent = `${blackSlider.value}%`;
   whiteValue.textContent = `${whiteSlider.value}%`;
 
@@ -228,6 +263,8 @@
       return;
     }
 
+    cancelRetry();
+    const generation = ++state.searchGeneration; // invalidates any earlier stream or pending retry
     stopPlayback();
     state.frames = [];
     state.currentIndex = 0;
@@ -236,6 +273,7 @@
     emptyState.hidden = true;
     frameLabel.textContent = "";
     canvasCtx.clearRect(0, 0, canvas.width, canvas.height);
+    crosshair.hidden = true;
 
     resolveStatus.textContent = "Resolving…";
     resolveStatus.className = "status-text";
@@ -292,18 +330,84 @@
     }
 
     progressText.textContent = "Fetching from IRSA…";
-    streamFrames(position, fov, detectors, mode, quality, cacheKey);
+    streamFrames({ position, fov, detectors, mode, quality, cacheKey }, generation, 1);
+  }
+
+  // ---------------------------------------------------------------------
+  // Automatic retry while the archive is down
+  //
+  // IRSA's search service drops out for a while at a time (the server then
+  // reports e.g. "SIA query failed: 502 Proxy Error"). A search that ended
+  // with an archive error and no frames is repeated quietly: the progress
+  // pill stays up as if the first attempt were still running, and nothing
+  // else appears on screen. Only when every retry has failed does a
+  // message come up, with a button to start over. A new search cancels it.
+  // ---------------------------------------------------------------------
+  const RETRY_DELAYS_S = [3, 5, 8, 12, 15]; // pause before each automatic retry
+  const MAX_AUTO_RETRIES = RETRY_DELAYS_S.length; // 5 retries after the first attempt
+
+  function cancelRetry() {
+    if (state.retryTimer) {
+      clearTimeout(state.retryTimer);
+      state.retryTimer = null;
+    }
+  }
+
+  function showFetchProgress() {
+    emptyState.hidden = true;
+    progressWrap.hidden = false;
+    progressBar.style.width = "0%";
+    progressText.textContent = "Fetching from IRSA…";
+  }
+
+  function showArchiveFailure(request, generation, errorText) {
+    progressWrap.hidden = true;
+    emptyState.textContent = "";
+    const message = document.createElement("span");
+    message.textContent =
+      `The IRSA archive is not answering right now.\n\nDetails: ${errorText.slice(0, 160)}`;
+    const againBtn = document.createElement("button");
+    againBtn.type = "button";
+    againBtn.className = "text-btn";
+    againBtn.textContent = "Try again";
+    againBtn.addEventListener("click", () => {
+      if (generation !== state.searchGeneration) return;
+      showFetchProgress();
+      streamFrames(request, generation, 1);
+    });
+    emptyState.append(message, againBtn);
+    emptyState.hidden = false;
+  }
+
+  function scheduleRetry(request, generation, attempt, errorText) {
+    cancelRetry();
+    const retriesDone = attempt - 1;
+    if (retriesDone >= MAX_AUTO_RETRIES) {
+      showArchiveFailure(request, generation, errorText);
+      return;
+    }
+    showFetchProgress(); // same pill as the first attempt: the wait is not announced
+    state.retryTimer = setTimeout(() => {
+      state.retryTimer = null;
+      if (generation !== state.searchGeneration) return;
+      streamFrames(request, generation, attempt + 1);
+    }, RETRY_DELAYS_S[retriesDone] * 1000);
   }
 
   function reviveFrame(stored) {
     return { ...stored, data: new Uint16Array(stored.data) };
   }
 
-  async function streamFrames(position, fov, detectors, mode, quality, cacheKey) {
-    const url = `${API_BASE}/api/frames?position=${encodeURIComponent(position)}&fov=${fov}&detectors=${detectors.join(",")}&group=${mode}&quality=${quality}`;
+  async function streamFrames(request, generation, attempt) {
+    const { position, fov, detectors, mode, quality, cacheKey } = request;
+    const url = `${API_BASE}/api/frames?position=${encodeURIComponent(position)}&fov=${fov}&detectors=${detectors.join(",")}&group=${mode}&quality=${quality}&progress=1`;
     let resp;
     try {
-      resp = await fetch(url);
+      // no-store: the server marks this response cacheable for 5 minutes
+      // before it knows how the stream will end, so without this a failed
+      // attempt (IRSA down) is replayed from the browser's HTTP cache on
+      // every retry. Successful sets are cached in IndexedDB instead.
+      resp = await fetch(url, { cache: "no-store" });
     } catch (e) {
       progressText.textContent = `Network error: ${e.message}`;
       return;
@@ -319,9 +423,34 @@
     let nGroups = null;
     let received = 0;
     let firstFrameShown = false;
+    let download = null; // latest {"progress": ...} line: images downloaded / failed / total
+
+    // A frame is only complete once every exposure of its epoch is in, which
+    // can take minutes - so the bar follows the individual image downloads
+    // (when the server reports them) and the text gives both counts.
+    const showProgress = () => {
+      const framesText = nGroups ? `${received} / ${nGroups} frame(s) ready` : `${received} frame(s) ready`;
+      if (download && download.total > 0) {
+        const finished = download.downloaded + download.failed;
+        const percent = Math.floor((download.downloaded / download.total) * 100);
+        progressBar.style.width = `${Math.min(100, (finished / download.total) * 100)}%`;
+        let text = `${download.downloaded} / ${download.total} images downloaded (${percent}%)`;
+        if (download.failed) text += `, ${download.failed} failed`;
+        if (received) text += `, ${framesText}`;
+        progressText.textContent = text;
+      } else if (received) {
+        if (nGroups) progressBar.style.width = `${Math.min(100, (received / nGroups) * 100)}%`;
+        progressText.textContent = framesText;
+      }
+    };
+    let streamError = null; // last {"error": ...} line the server sent, if any
 
     while (true) {
       const { value, done } = await reader.read();
+      if (generation !== state.searchGeneration) {
+        reader.cancel().catch(() => {}); // a newer search has started; drop this one
+        return;
+      }
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
       let newlineIdx;
@@ -335,8 +464,15 @@
         } catch (e) {
           continue;
         }
+        if (obj.progress) {
+          download = obj.progress;
+          showProgress();
+          continue;
+        }
         if (obj.error) {
-          progressText.textContent = `Error: ${obj.error}`;
+          // Not shown here: with no frames it is retried quietly, with
+          // some frames it is reported once the stream ends (both below).
+          streamError = obj.error;
           continue;
         }
         nGroups = obj.n_groups || nGroups;
@@ -361,12 +497,7 @@
         };
         state.frames.push(frame);
         received++;
-        if (nGroups) {
-          progressBar.style.width = `${Math.min(100, (received / nGroups) * 100)}%`;
-          progressText.textContent = `${received} / ${nGroups} frame(s) ready`;
-        } else {
-          progressText.textContent = `${received} frame(s) ready`;
-        }
+        showProgress();
         if (!firstFrameShown) {
           firstFrameShown = true;
           sortAndShowFirst();
@@ -393,14 +524,26 @@
       }
     }
 
-    progressText.textContent = `Done: ${state.frames.length} frame(s)`;
-    setTimeout(() => (progressWrap.hidden = true), 2000);
-
     if (state.frames.length === 0) {
+      // Two different situations end with nothing to show; say which one.
+      // The server reported a failure (IRSA unreachable or busy): that is
+      // not "no images here", and trying again shortly usually works - so
+      // that case retries by itself, quietly (see scheduleRetry).
+      if (streamError) {
+        scheduleRetry(request, generation, attempt, streamError);
+        return;
+      }
+      progressWrap.hidden = true;
       emptyState.hidden = false;
       emptyState.textContent = "No SPHEREx images found at this position/FOV/detector selection.";
       return;
     }
+
+    progressText.textContent = streamError
+      ? `${state.frames.length} frame(s) loaded; the archive reported an error: ${streamError.slice(0, 120)}`
+      : `Done: ${state.frames.length} frame(s)`;
+    setTimeout(() => (progressWrap.hidden = true), streamError ? 8000 : 2000);
+
 
     // Cache the whole set now that the stream is complete.
     const serializable = state.frames.map((f) => ({ ...f, data: f.data.buffer.slice(0) }));
@@ -587,36 +730,19 @@
       rgba[o + 3] = 255;
     }
 
-    offscreen.width = width;
-    offscreen.height = height;
-    offscreenCtx.putImageData(new ImageData(rgba, width, height), 0, 0);
+    // One canvas pixel per grid pixel; on-screen size and zoom are CSS
+    // (see layoutCanvas). Setting width/height also clears the canvas.
+    if (canvas.width !== width) canvas.width = width;
+    if (canvas.height !== height) canvas.height = height;
+    canvasCtx.putImageData(new ImageData(rgba, width, height), 0, 0);
+    layoutCanvas();
 
-    const zoom = parseInt(zoomSlider.value, 10);
-    canvas.width = width * zoom;
-    canvas.height = height * zoom;
-    canvasCtx.imageSmoothingEnabled = false;
-    canvasCtx.clearRect(0, 0, canvas.width, canvas.height);
-    canvasCtx.drawImage(offscreen, 0, 0, width, height, 0, 0, width * zoom, height * zoom);
-
-    // crosshair on the target (always the grid centre, by construction) -
-    // colour/gapped style matches the planet-x renderer's blink.py
-    // (fill=(255,80,80)); gap/arm length kept proportional to our zoom
-    // instead of their fixed native-pixel offsets, since our grids are
-    // much smaller (~30px vs their ~195px) and our zoom is adjustable.
-    canvasCtx.strokeStyle = "rgba(255,80,80,0.9)";
-    canvasCtx.lineWidth = 2;
-    const cx = canvas.width / 2;
-    const cy = canvas.height / 2;
-    canvasCtx.beginPath();
-    canvasCtx.moveTo(cx - 10, cy);
-    canvasCtx.lineTo(cx - 3, cy);
-    canvasCtx.moveTo(cx + 3, cy);
-    canvasCtx.lineTo(cx + 10, cy);
-    canvasCtx.moveTo(cx, cy - 10);
-    canvasCtx.lineTo(cx, cy - 3);
-    canvasCtx.moveTo(cx, cy + 3);
-    canvasCtx.lineTo(cx, cy + 10);
-    canvasCtx.stroke();
+    // Crosshair on the target (always the grid centre, by construction):
+    // a CSS overlay at the stage centre (#crosshair in style.css) rather
+    // than strokes in the canvas, so it keeps a constant on-screen size at
+    // any zoom. Colour/gapped style still matches the planet-x renderer's
+    // blink.py (fill=(255,80,80)).
+    crosshair.hidden = false;
   }
 
   function updateContaminationSummary() {
@@ -731,9 +857,8 @@
     const rect = canvas.getBoundingClientRect();
     const canvasX = ((ev.clientX - rect.left) / rect.width) * canvas.width;
     const canvasY = ((ev.clientY - rect.top) / rect.height) * canvas.height;
-    const zoom = parseInt(zoomSlider.value, 10);
-    const px = Math.floor(canvasX / zoom);
-    const py = Math.floor(canvasY / zoom);
+    const px = Math.floor(canvasX); // canvas pixels are grid pixels (see renderGrid)
+    const py = Math.floor(canvasY);
     if (px < 0 || py < 0 || px >= grid.width || py >= grid.height) return null;
 
     const pixelScaleArcsec = (state.fovArcmin * 60) / grid.width;
